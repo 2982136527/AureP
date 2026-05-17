@@ -11,7 +11,9 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.util.Log
 import android.view.ViewGroup
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -102,6 +104,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.C
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.MediaItem as PlayerMediaItem
@@ -119,6 +122,7 @@ import androidx.media3.datasource.StatsDataSource
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.qiuhu.embyflow.data.emby.EmbyPlaybackInfoField
+import com.qiuhu.embyflow.data.emby.EmbyPlaybackSessionState
 import com.qiuhu.embyflow.data.emby.EmbyPlaybackSource
 import com.qiuhu.embyflow.data.emby.EmbyPlaybackStreamOption
 import com.qiuhu.embyflow.data.emby.EmbySubtitleTrack
@@ -136,6 +140,7 @@ import kotlinx.coroutines.delay
 
 private val PlayerAccentColor = Color(0xFFF0E7DA)
 private val PlayerPanelColor = Color(0xCC101010)
+private const val PlayerDebugTag = "AurePPlayer"
 
 @Composable
 fun PlayerScreen(
@@ -144,6 +149,9 @@ fun PlayerScreen(
     source: EmbyPlaybackSource,
     initialResumePositionMs: Long,
     settings: AppSettings,
+    onPlaybackStarted: (EmbyPlaybackSessionState) -> Unit,
+    onPlaybackProgress: (EmbyPlaybackSessionState, String) -> Unit,
+    onPlaybackStopped: (EmbyPlaybackSessionState) -> Unit,
     onClose: (Long, Long) -> Unit,
 ) {
     val context = LocalContext.current
@@ -249,6 +257,15 @@ fun PlayerScreen(
     var gestureActive by remember {
         mutableStateOf(false)
     }
+    var failedStreamOptionIds by remember(mediaId) {
+        mutableStateOf(emptySet<String>())
+    }
+    var autoFallbackInProgress by remember(mediaId) {
+        mutableStateOf(false)
+    }
+    var forceVlcCompatibilityBackend by rememberSaveable(mediaId) {
+        mutableStateOf(false)
+    }
     val activity = remember(context) {
         context.findActivity()
     }
@@ -261,6 +278,23 @@ fun PlayerScreen(
     }
     val activeStreamOption = remember(streamOptions, selectedStreamOptionId) {
         streamOptions.firstOrNull { it.id == selectedStreamOptionId } ?: streamOptions.first()
+    }
+    var hasRenderedFirstFrame by remember(activeStreamOption.id) {
+        mutableStateOf(false)
+    }
+    var playbackStartedReported by rememberSaveable(
+        mediaId,
+        source.mediaSourceId,
+        source.playSessionId,
+    ) {
+        mutableStateOf(false)
+    }
+    var playbackStoppedReported by rememberSaveable(
+        mediaId,
+        source.mediaSourceId,
+        source.playSessionId,
+    ) {
+        mutableStateOf(false)
     }
 
     val activeSubtitleTracks = remember(source, autoSubtitleTracks, selectedSubtitleIndex) {
@@ -282,83 +316,474 @@ fun PlayerScreen(
     val streamChoiceLabel = remember(activeStreamOption) {
         activeStreamOption.label
     }
-    val playbackTrafficTracker = remember(activeStreamOption.id, activeStreamOption.streamUrl) {
+    val sourceContainer = remember(source.infoFields) {
+        source.infoFields.firstOrNull { it.label == "封装" }?.value.orEmpty()
+    }
+    val sourceVideoCodec = remember(source.infoFields) {
+        source.infoFields.firstOrNull { it.label == "视频编码" }?.value.orEmpty()
+    }
+    val sourceAudioCodec = remember(source.infoFields) {
+        source.infoFields.firstOrNull { it.label == "音频编码" }?.value.orEmpty()
+    }
+    val sourceRequiresCompatibilityBackend = remember(sourceContainer, sourceVideoCodec) {
+        shouldPreferCompatibilityBackend(
+            container = sourceContainer,
+            videoCodec = sourceVideoCodec,
+        )
+    }
+    val preferredBackendKind = if (
+        forceVlcCompatibilityBackend ||
+        runtimeProfile.backendKind == PlayerBackendKind.Vlc ||
+        sourceRequiresCompatibilityBackend
+    ) {
+        PlayerBackendKind.Vlc
+    } else {
+        PlayerBackendKind.Exo
+    }
+    val experimentalDualBackendRace = remember(
+        settings.experimentalDualBackendRace,
+        forceVlcCompatibilityBackend,
+        runtimeProfile.backendKind,
+        sourceContainer,
+        sourceVideoCodec,
+        sourceAudioCodec,
+        source.infoLine,
+    ) {
+        settings.experimentalDualBackendRace &&
+            !forceVlcCompatibilityBackend &&
+            runtimeProfile.backendKind == PlayerBackendKind.Exo &&
+            !sourceRequiresCompatibilityBackend &&
+            shouldUseDualBackendRace(
+                container = sourceContainer,
+                videoCodec = sourceVideoCodec,
+                audioCodec = sourceAudioCodec,
+                infoLine = source.infoLine,
+            )
+    }
+    var activeBackendKindName by rememberSaveable(
+        mediaId,
+        activeStreamOption.id,
+        preferredBackendKind.name,
+        experimentalDualBackendRace,
+    ) {
+        mutableStateOf(preferredBackendKind.name)
+    }
+    var raceResolved by rememberSaveable(
+        mediaId,
+        activeStreamOption.id,
+        experimentalDualBackendRace,
+    ) {
+        mutableStateOf(!experimentalDualBackendRace)
+    }
+    var exoFirstFrameAtMs by remember(activeStreamOption.id) {
+        mutableLongStateOf(0L)
+    }
+    var vlcFirstFrameAtMs by remember(activeStreamOption.id) {
+        mutableLongStateOf(0L)
+    }
+    val activeBackendKind = remember(activeBackendKindName) {
+        PlayerBackendKind.valueOf(activeBackendKindName)
+    }
+    val raceInProgress = experimentalDualBackendRace && !raceResolved
+    val vlcForceSoftwareDecode = remember(
+        sourceContainer,
+        sourceVideoCodec,
+        preferredBackendKind,
+        experimentalDualBackendRace,
+    ) {
+        (preferredBackendKind == PlayerBackendKind.Vlc || experimentalDualBackendRace) &&
+            shouldForceVlcSoftwareDecode(
+            container = sourceContainer,
+            videoCodec = sourceVideoCodec,
+        )
+    }
+    val promoteRaceBackend: (PlayerBackendKind, String) -> Unit = { backendKind, trigger ->
+        if (!experimentalDualBackendRace) {
+            Unit
+        } else if (raceResolved && activeBackendKind == backendKind) {
+            Unit
+        } else {
+            Log.i(
+                PlayerDebugTag,
+                "dual-race select title=$title mediaId=$mediaId backend=$backendKind trigger=$trigger option=${activeStreamOption.id}",
+            )
+            activeBackendKindName = backendKind.name
+            raceResolved = true
+            hasRenderedFirstFrame = when (backendKind) {
+                PlayerBackendKind.Exo -> exoFirstFrameAtMs > 0L
+                PlayerBackendKind.Vlc -> vlcFirstFrameAtMs > 0L
+            }
+            bitrateEstimateBitsPerSecond = 0L
+        }
+    }
+    val registerBackendFirstFrame: (PlayerBackendKind, Long?) -> Unit = { backendKind, renderTimeMs ->
+        val nowMs = SystemClock.elapsedRealtime()
+        when (backendKind) {
+            PlayerBackendKind.Exo -> {
+                if (exoFirstFrameAtMs == 0L) {
+                    exoFirstFrameAtMs = nowMs
+                }
+            }
+
+            PlayerBackendKind.Vlc -> {
+                if (vlcFirstFrameAtMs == 0L) {
+                    vlcFirstFrameAtMs = nowMs
+                }
+            }
+        }
+
+        if (experimentalDualBackendRace) {
+            val winner = when {
+                exoFirstFrameAtMs > 0L && vlcFirstFrameAtMs > 0L ->
+                    if (exoFirstFrameAtMs <= vlcFirstFrameAtMs) PlayerBackendKind.Exo else PlayerBackendKind.Vlc
+                backendKind == PlayerBackendKind.Exo && vlcFirstFrameAtMs == 0L -> PlayerBackendKind.Exo
+                backendKind == PlayerBackendKind.Vlc && exoFirstFrameAtMs == 0L -> PlayerBackendKind.Vlc
+                else -> null
+            }
+            if (winner != null) {
+                promoteRaceBackend(
+                    winner,
+                    renderTimeMs?.let { "first-frame-$it" } ?: "first-frame",
+                )
+            }
+        } else if (activeBackendKind == backendKind) {
+            hasRenderedFirstFrame = true
+            isBuffering = false
+        }
+    }
+    val playbackTrafficTracker = remember(
+        activeStreamOption.id,
+        activeStreamOption.streamUrl,
+        preferredBackendKind,
+        experimentalDualBackendRace,
+    ) {
         PlaybackTrafficTracker()
     }
     var resolvedPlaybackUrl by rememberSaveable(activeStreamOption.id, activeStreamOption.streamUrl) {
         mutableStateOf(activeStreamOption.streamUrl)
     }
-    val mediaItem = remember(activeStreamOption.streamUrl, activeSubtitleTracks) {
-        PlayerMediaItem.Builder()
-            .setUri(activeStreamOption.streamUrl)
-            .setSubtitleConfigurations(
-                activeSubtitleTracks.map { subtitle ->
-                    PlayerMediaItem.SubtitleConfiguration.Builder(Uri.parse(subtitle.url))
-                        .setMimeType(subtitle.mimeType)
-                        .setLanguage(subtitle.language)
-                        .setLabel(subtitle.label)
-                        .setSelectionFlags(if (subtitle.isDefault) C.SELECTION_FLAG_DEFAULT else 0)
-                        .build()
+    val mediaItem = remember(
+        activeStreamOption.streamUrl,
+        activeSubtitleTracks,
+        preferredBackendKind,
+        experimentalDualBackendRace,
+    ) {
+        if (preferredBackendKind == PlayerBackendKind.Vlc && !experimentalDualBackendRace) {
+            null
+        } else {
+            PlayerMediaItem.Builder()
+                .setUri(activeStreamOption.streamUrl)
+                .setSubtitleConfigurations(
+                    activeSubtitleTracks.map { subtitle ->
+                        PlayerMediaItem.SubtitleConfiguration.Builder(Uri.parse(subtitle.url))
+                            .setMimeType(subtitle.mimeType)
+                            .setLanguage(subtitle.language)
+                            .setLabel(subtitle.label)
+                            .setSelectionFlags(if (subtitle.isDefault) C.SELECTION_FLAG_DEFAULT else 0)
+                            .build()
+                    },
+                )
+                .build()
+        }
+    }
+    val exoPlayer = if (preferredBackendKind == PlayerBackendKind.Vlc && !experimentalDualBackendRace) {
+        null
+    } else {
+        remember(
+            context,
+            mediaItem,
+            runtimeProfile,
+            activeStreamOption.requestHeaders,
+            experimentalDualBackendRace,
+        ) {
+            val renderersFactory = DefaultRenderersFactory(context)
+                .setEnableDecoderFallback(runtimeProfile.decoderFallback)
+            val loadControl = DefaultLoadControl.Builder()
+                .setBufferDurationsMs(
+                    runtimeProfile.minBufferMs,
+                    runtimeProfile.maxBufferMs,
+                    runtimeProfile.bufferForPlaybackMs,
+                    runtimeProfile.bufferForPlaybackAfterRebufferMs,
+                )
+                .build()
+            val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+                .setAllowCrossProtocolRedirects(true)
+                .setDefaultRequestProperties(activeStreamOption.requestHeaders)
+            val trackingDataSourceFactory = TrackingDataSourceFactory(
+                upstream = httpDataSourceFactory,
+                tracker = playbackTrafficTracker,
+                onOpenedUri = { openedUri ->
+                    val candidate = openedUri.toString().trim()
+                    if (candidate.isBlank() || candidate.isSubtitleLikeUri()) return@TrackingDataSourceFactory
+                    mainHandler.post {
+                        if (
+                            resolvedPlaybackUrl == activeStreamOption.streamUrl ||
+                            resolvedPlaybackUrl == candidate
+                        ) {
+                            resolvedPlaybackUrl = candidate
+                        }
+                    }
                 },
             )
-            .build()
+            val mediaSourceFactory = DefaultMediaSourceFactory(context)
+                .setDataSourceFactory(trackingDataSourceFactory)
+
+            ExoPlayer.Builder(context, renderersFactory)
+                .setMediaSourceFactory(mediaSourceFactory)
+                .setLoadControl(loadControl)
+                .setSeekBackIncrementMs(runtimeProfile.seekBackMs)
+                .setSeekForwardIncrementMs(runtimeProfile.seekForwardMs)
+                .build().apply {
+                    setMediaItem(requireNotNull(mediaItem))
+                    prepare()
+                    if (resumePositionMs > 0L) {
+                        seekTo(resumePositionMs)
+                    }
+                    playbackParameters = PlaybackParameters(playbackSpeed)
+                    playWhenReady = resumePlayWhenReady
+                    volume = if (experimentalDualBackendRace) 0f else 1f
+                }
+        }
     }
-    val exoPlayer = remember(context, mediaItem, runtimeProfile, activeStreamOption.requestHeaders) {
-        val renderersFactory = DefaultRenderersFactory(context)
-            .setEnableDecoderFallback(runtimeProfile.decoderFallback)
-        val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(
-                runtimeProfile.minBufferMs,
-                runtimeProfile.maxBufferMs,
-                runtimeProfile.bufferForPlaybackMs,
-                runtimeProfile.bufferForPlaybackAfterRebufferMs,
+    val vlcPlayer = if (preferredBackendKind == PlayerBackendKind.Vlc || experimentalDualBackendRace) {
+        remember(
+            context,
+            activeStreamOption.streamUrl,
+            activeSubtitleTracks,
+            activeStreamOption.requestHeaders,
+            resumePositionMs,
+            resumePlayWhenReady,
+            playbackSpeed,
+            experimentalDualBackendRace,
+        ) {
+            VlcPlayerSession(
+                context = context,
+                streamUrl = activeStreamOption.streamUrl,
+                subtitleTracks = activeSubtitleTracks,
+                requestHeaders = activeStreamOption.requestHeaders,
+                forceSoftwareDecode = vlcForceSoftwareDecode,
+                startPositionMs = resumePositionMs,
+                playWhenReady = resumePlayWhenReady,
+                initialVolume = if (experimentalDualBackendRace) 0 else 100,
+                initialPlaybackSpeed = playbackSpeed,
+                seekBackMs = runtimeProfile.seekBackMs,
+                seekForwardMs = runtimeProfile.seekForwardMs,
+                onFirstFrameRendered = {
+                    mainHandler.post {
+                        registerBackendFirstFrame(PlayerBackendKind.Vlc, null)
+                    }
+                },
             )
-            .build()
-        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-            .setAllowCrossProtocolRedirects(true)
-            .setDefaultRequestProperties(activeStreamOption.requestHeaders)
-        val trackingDataSourceFactory = TrackingDataSourceFactory(
-            upstream = httpDataSourceFactory,
-            tracker = playbackTrafficTracker,
-            onOpenedUri = { openedUri ->
-                val candidate = openedUri.toString().trim()
-                if (candidate.isBlank() || candidate.isSubtitleLikeUri()) return@TrackingDataSourceFactory
-                mainHandler.post {
-                    if (
-                        resolvedPlaybackUrl == activeStreamOption.streamUrl ||
-                        resolvedPlaybackUrl == candidate
-                    ) {
-                        resolvedPlaybackUrl = candidate
+        }
+    } else {
+        null
+    }
+
+    fun currentPositionSnapshot(): Long = when (activeBackendKind) {
+        PlayerBackendKind.Vlc -> vlcPlayer?.currentPositionMs?.coerceAtLeast(0L) ?: 0L
+        PlayerBackendKind.Exo -> exoPlayer?.currentPosition?.coerceAtLeast(0L) ?: 0L
+    }
+
+    fun durationSnapshot(): Long = when (activeBackendKind) {
+        PlayerBackendKind.Vlc -> vlcPlayer?.durationMs?.coerceAtLeast(0L) ?: 0L
+        PlayerBackendKind.Exo -> exoPlayer?.duration?.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0L) ?: 0L
+    }
+
+    fun bufferedPositionSnapshot(): Long = when (activeBackendKind) {
+        PlayerBackendKind.Vlc -> vlcPlayer?.bufferedPositionMs?.coerceAtLeast(0L) ?: 0L
+        PlayerBackendKind.Exo -> exoPlayer?.bufferedPosition?.coerceAtLeast(0L) ?: 0L
+    }
+
+    fun isPlayingSnapshot(): Boolean = when (activeBackendKind) {
+        PlayerBackendKind.Vlc -> vlcPlayer?.isPlaying ?: false
+        PlayerBackendKind.Exo -> exoPlayer?.isPlaying ?: false
+    }
+
+    fun isBufferingSnapshot(): Boolean = when (activeBackendKind) {
+        PlayerBackendKind.Vlc -> vlcPlayer?.isBuffering ?: false
+        PlayerBackendKind.Exo -> exoPlayer?.playbackState == Player.STATE_BUFFERING
+    }
+
+    fun playbackStateSnapshot(): Int = when (activeBackendKind) {
+        PlayerBackendKind.Vlc -> when {
+            vlcPlayer?.isEnded == true -> Player.STATE_ENDED
+            vlcPlayer?.isBuffering == true -> Player.STATE_BUFFERING
+            vlcPlayer?.isPlaying == true -> Player.STATE_READY
+            else -> Player.STATE_IDLE
+        }
+
+        PlayerBackendKind.Exo -> exoPlayer?.playbackState ?: Player.STATE_IDLE
+    }
+
+    fun shouldExpectPlaybackToStart(): Boolean = if (raceInProgress) {
+        (exoPlayer?.playWhenReady ?: false) || (vlcPlayer?.playWhenReadyRequested ?: false)
+    } else {
+        when (activeBackendKind) {
+            PlayerBackendKind.Vlc -> vlcPlayer?.playWhenReadyRequested ?: resumePlayWhenReady
+            PlayerBackendKind.Exo -> exoPlayer?.playWhenReady ?: resumePlayWhenReady
+        }
+    }
+
+    fun currentPlaybackSpeedTarget(): Float = playbackSpeed
+
+    fun currentSubtitleStreamIndex(): Int? = when (selectedSubtitleIndex) {
+        null -> autoSubtitleTracks.firstOrNull()?.index
+        SUBTITLE_OFF -> null
+        else -> selectedSubtitleIndex
+    }
+
+    fun currentPlayMethod(): String = when (activeStreamOption.id) {
+        "server-transcode",
+        -> "Transcode"
+
+        else -> "DirectStream"
+    }
+
+    fun buildPlaybackSessionState(
+        positionOverrideMs: Long? = null,
+    ): EmbyPlaybackSessionState? {
+        val playSessionId = source.playSessionId?.takeIf { it.isNotBlank() } ?: return null
+        val mediaSourceId = source.mediaSourceId.takeIf { it.isNotBlank() } ?: return null
+        val positionMs = (
+            positionOverrideMs
+                ?: if (isScrubbing) sliderPositionMs.toLong() else currentPositionSnapshot()
+            ).coerceAtLeast(0L)
+        return EmbyPlaybackSessionState(
+            itemId = mediaId,
+            mediaSourceId = mediaSourceId,
+            playSessionId = playSessionId,
+            positionMs = positionMs,
+            durationMs = durationSnapshot().coerceAtLeast(0L),
+            isPaused = !isPlayingSnapshot(),
+            playbackRate = playbackSpeed.toDouble(),
+            subtitleStreamIndex = currentSubtitleStreamIndex(),
+            playMethod = currentPlayMethod(),
+        )
+    }
+
+    fun reportPlaybackStartedIfNeeded() {
+        if (playbackStartedReported || playbackStoppedReported) return
+        val state = buildPlaybackSessionState() ?: return
+        playbackStartedReported = true
+        onPlaybackStarted(state)
+    }
+
+    fun reportPlaybackProgressEvent(
+        eventName: String,
+        positionOverrideMs: Long? = null,
+    ) {
+        if (!playbackStartedReported || playbackStoppedReported) return
+        buildPlaybackSessionState(positionOverrideMs)?.let { state ->
+            onPlaybackProgress(state, eventName)
+        }
+    }
+
+    fun reportPlaybackStoppedIfNeeded() {
+        if (!playbackStartedReported || playbackStoppedReported) return
+        val state = buildPlaybackSessionState() ?: return
+        playbackStoppedReported = true
+        onPlaybackStopped(state)
+    }
+
+    fun capturePlaybackState() {
+        resumePositionMs = if (raceInProgress) {
+            max(
+                exoPlayer?.currentPosition?.coerceAtLeast(0L) ?: 0L,
+                vlcPlayer?.currentPositionMs?.coerceAtLeast(0L) ?: 0L,
+            )
+        } else {
+            currentPositionSnapshot()
+        }
+        resumePlayWhenReady = shouldExpectPlaybackToStart()
+    }
+
+    fun seekToPlayback(positionMs: Long) {
+        if (raceInProgress) {
+            exoPlayer?.seekTo(positionMs)
+            vlcPlayer?.seekTo(positionMs)
+        } else {
+            when (activeBackendKind) {
+                PlayerBackendKind.Vlc -> vlcPlayer?.seekTo(positionMs)
+                PlayerBackendKind.Exo -> exoPlayer?.seekTo(positionMs)
+            }
+        }
+    }
+
+    fun seekBackPlayback() {
+        if (raceInProgress) {
+            exoPlayer?.seekBack()
+            vlcPlayer?.seekBack()
+        } else {
+            when (activeBackendKind) {
+                PlayerBackendKind.Vlc -> vlcPlayer?.seekBack()
+                PlayerBackendKind.Exo -> exoPlayer?.seekBack()
+            }
+        }
+    }
+
+    fun seekForwardPlayback() {
+        if (raceInProgress) {
+            exoPlayer?.seekForward()
+            vlcPlayer?.seekForward()
+        } else {
+            when (activeBackendKind) {
+                PlayerBackendKind.Vlc -> vlcPlayer?.seekForward()
+                PlayerBackendKind.Exo -> exoPlayer?.seekForward()
+            }
+        }
+    }
+
+    fun togglePlayPausePlayback() {
+        if (raceInProgress) {
+            val shouldPause = (exoPlayer?.isPlaying == true) || (vlcPlayer?.isPlaying == true)
+            if (shouldPause) {
+                exoPlayer?.pause()
+                vlcPlayer?.pause()
+            } else {
+                exoPlayer?.play()
+                vlcPlayer?.play()
+            }
+        } else {
+            when (activeBackendKind) {
+                PlayerBackendKind.Vlc -> {
+                    if (vlcPlayer?.isPlaying == true) {
+                        vlcPlayer.pause()
+                    } else {
+                        vlcPlayer?.play()
                     }
                 }
-            },
-        )
-        val mediaSourceFactory = DefaultMediaSourceFactory(context)
-            .setDataSourceFactory(trackingDataSourceFactory)
 
-        ExoPlayer.Builder(context, renderersFactory)
-            .setMediaSourceFactory(mediaSourceFactory)
-            .setLoadControl(loadControl)
-            .setSeekBackIncrementMs(runtimeProfile.seekBackMs)
-            .setSeekForwardIncrementMs(runtimeProfile.seekForwardMs)
-            .build().apply {
-                setMediaItem(mediaItem)
-                prepare()
-                if (resumePositionMs > 0L) {
-                    seekTo(resumePositionMs)
+                PlayerBackendKind.Exo -> {
+                    if (exoPlayer?.isPlaying == true) {
+                        exoPlayer.pause()
+                    } else {
+                        exoPlayer?.play()
+                    }
                 }
-                playbackParameters = PlaybackParameters(playbackSpeed)
-                playWhenReady = resumePlayWhenReady
             }
+        }
     }
 
     fun revealControls() {
         controlsVisible = true
     }
 
-    fun capturePlaybackState() {
-        resumePositionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
-        resumePlayWhenReady = exoPlayer.playWhenReady
+    fun forceCompatibilityBackend(trigger: String) {
+        if (experimentalDualBackendRace) {
+            promoteRaceBackend(PlayerBackendKind.Vlc, trigger)
+            return
+        }
+        if (preferredBackendKind == PlayerBackendKind.Vlc) return
+        Log.w(
+            PlayerDebugTag,
+            "force vlc backend title=$title mediaId=$mediaId trigger=$trigger option=${activeStreamOption.id} url=${activeStreamOption.streamUrl}",
+        )
+        capturePlaybackState()
+        resumePlayWhenReady = true
+        forceVlcCompatibilityBackend = true
+        hasRenderedFirstFrame = false
+        bitrateEstimateBitsPerSecond = 0L
+        autoFallbackInProgress = false
     }
 
     fun maybeUpdateResolvedPlaybackUrl(
@@ -385,91 +810,389 @@ fun PlayerScreen(
         revealControls()
     }
 
-    DisposableEffect(exoPlayer) {
-        val listener = object : Player.Listener {
-            override fun onIsPlayingChanged(playing: Boolean) {
-                isPlaying = playing
+    fun attemptAutoFallback(trigger: String): Boolean {
+        if (autoFallbackInProgress) {
+            return true
+        }
+        val currentIndex = streamOptions.indexOfFirst { it.id == activeStreamOption.id }
+        val orderedCandidates = buildList {
+            if (currentIndex >= 0) {
+                addAll(streamOptions.drop(currentIndex + 1))
+                addAll(streamOptions.take(currentIndex))
+            } else {
+                addAll(streamOptions)
             }
+        }.filter { option ->
+            option.id != activeStreamOption.id && option.id !in failedStreamOptionIds
+        }
+        val directPriorityIds = setOf("server-direct", "emby-direct")
+        val fallbackCandidates = buildList {
+            addAll(orderedCandidates.filter { it.id in directPriorityIds })
+            addAll(orderedCandidates.filter { it.id !in directPriorityIds })
+        }.distinctBy { it.id }
+        val nextOption = fallbackCandidates.firstOrNull() ?: return false
 
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                isBuffering = playbackState == Player.STATE_BUFFERING
-                val duration = exoPlayer.duration.takeIf { it != C.TIME_UNSET } ?: 0L
-                durationMs = duration.coerceAtLeast(0L)
-                bufferedPositionMs = exoPlayer.bufferedPosition.coerceAtLeast(0L)
-                if (!isScrubbing) {
-                    currentPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
+        autoFallbackInProgress = true
+        failedStreamOptionIds = failedStreamOptionIds + activeStreamOption.id
+        Log.w(
+            PlayerDebugTag,
+            "auto-fallback title=$title mediaId=$mediaId trigger=$trigger from=${activeStreamOption.id} to=${nextOption.id} entry=${activeStreamOption.streamUrl} resolved=$resolvedPlaybackUrl",
+        )
+        capturePlaybackState()
+        resumePlayWhenReady = true
+        selectedStreamOptionId = nextOption.id
+        mainHandler.post {
+            Toast.makeText(
+                context.applicationContext,
+                "当前片源起播异常，已切到${nextOption.label}",
+                Toast.LENGTH_SHORT,
+            ).show()
+        }
+        return true
+    }
+
+    val keepExoSession = exoPlayer != null &&
+        (!experimentalDualBackendRace || raceInProgress || activeBackendKind == PlayerBackendKind.Exo)
+    val keepVlcSession = vlcPlayer != null &&
+        (!experimentalDualBackendRace || raceInProgress || activeBackendKind == PlayerBackendKind.Vlc)
+
+    LaunchedEffect(exoPlayer, vlcPlayer, experimentalDualBackendRace, raceResolved, activeBackendKind) {
+        exoPlayer?.volume = when {
+            experimentalDualBackendRace && !raceResolved -> 0f
+            activeBackendKind == PlayerBackendKind.Exo -> 1f
+            else -> 0f
+        }
+        vlcPlayer?.setVolume(
+            when {
+                experimentalDualBackendRace && !raceResolved -> 0
+                activeBackendKind == PlayerBackendKind.Vlc -> 100
+                else -> 0
+            },
+        )
+    }
+
+    if (keepExoSession) {
+        DisposableEffect(exoPlayer) {
+            val player = exoPlayer
+            val listener = object : Player.Listener {
+                override fun onIsPlayingChanged(playing: Boolean) {
+                    if (!experimentalDualBackendRace || raceInProgress || activeBackendKind == PlayerBackendKind.Exo) {
+                        isPlaying = playing
+                    }
+                }
+
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (!experimentalDualBackendRace || raceInProgress || activeBackendKind == PlayerBackendKind.Exo) {
+                        isBuffering = playbackState == Player.STATE_BUFFERING
+                        val duration = player.duration.takeIf { it != C.TIME_UNSET } ?: 0L
+                        durationMs = duration.coerceAtLeast(0L)
+                        bufferedPositionMs = player.bufferedPosition.coerceAtLeast(0L)
+                        if (!isScrubbing) {
+                            currentPositionMs = player.currentPosition.coerceAtLeast(0L)
+                        }
+                    }
+                }
+
+                override fun onPlayerError(error: PlaybackException) {
+                    Log.e(
+                        PlayerDebugTag,
+                        "player error title=$title mediaId=$mediaId option=${activeStreamOption.id} entry=${activeStreamOption.streamUrl} resolved=$resolvedPlaybackUrl",
+                        error,
+                    )
+                    if (experimentalDualBackendRace && !raceResolved) {
+                        promoteRaceBackend(
+                            PlayerBackendKind.Vlc,
+                            error.errorCodeName.ifBlank { "exo-error" },
+                        )
+                        return
+                    }
+                    if (
+                        error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED ||
+                        error.cause?.javaClass?.simpleName == "UnrecognizedInputFormatException"
+                    ) {
+                        forceCompatibilityBackend(error.errorCodeName.ifBlank { "容器不支持" })
+                        return
+                    }
+                    if (!attemptAutoFallback(error.errorCodeName.ifBlank { "播放失败" })) {
+                        mainHandler.post {
+                            Toast.makeText(
+                                context.applicationContext,
+                                "当前片源暂时无法播放，请切换播放方式再试",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                    }
                 }
             }
-        }
-        val analyticsListener = object : AnalyticsListener {
-            override fun onLoadStarted(
-                eventTime: AnalyticsListener.EventTime,
-                loadEventInfo: LoadEventInfo,
-                mediaLoadData: MediaLoadData,
-            ) {
-                maybeUpdateResolvedPlaybackUrl(loadEventInfo, mediaLoadData)
-            }
+            val analyticsListener = object : AnalyticsListener {
+                    override fun onLoadStarted(
+                        eventTime: AnalyticsListener.EventTime,
+                        loadEventInfo: LoadEventInfo,
+                        mediaLoadData: MediaLoadData,
+                    ) {
+                        maybeUpdateResolvedPlaybackUrl(loadEventInfo, mediaLoadData)
+                    }
 
-            override fun onLoadCompleted(
-                eventTime: AnalyticsListener.EventTime,
-                loadEventInfo: LoadEventInfo,
-                mediaLoadData: MediaLoadData,
-            ) {
-                maybeUpdateResolvedPlaybackUrl(loadEventInfo, mediaLoadData)
+                    override fun onLoadCompleted(
+                        eventTime: AnalyticsListener.EventTime,
+                        loadEventInfo: LoadEventInfo,
+                        mediaLoadData: MediaLoadData,
+                    ) {
+                        maybeUpdateResolvedPlaybackUrl(loadEventInfo, mediaLoadData)
+                    }
+
+                    override fun onLoadError(
+                        eventTime: AnalyticsListener.EventTime,
+                        loadEventInfo: LoadEventInfo,
+                        mediaLoadData: MediaLoadData,
+                        error: java.io.IOException,
+                        wasCanceled: Boolean,
+                    ) {
+                        Log.w(
+                            PlayerDebugTag,
+                            "load error title=$title mediaId=$mediaId option=${activeStreamOption.id} canceled=$wasCanceled uri=${loadEventInfo.uri}",
+                            error,
+                        )
+                    }
+
+                    override fun onAudioCodecError(
+                        eventTime: AnalyticsListener.EventTime,
+                        audioCodecError: Exception,
+                    ) {
+                        Log.e(
+                            PlayerDebugTag,
+                            "audio codec error title=$title mediaId=$mediaId option=${activeStreamOption.id} resolved=$resolvedPlaybackUrl",
+                            audioCodecError,
+                        )
+                    }
+
+                    override fun onVideoCodecError(
+                        eventTime: AnalyticsListener.EventTime,
+                        videoCodecError: Exception,
+                    ) {
+                        Log.e(
+                            PlayerDebugTag,
+                            "video codec error title=$title mediaId=$mediaId option=${activeStreamOption.id} resolved=$resolvedPlaybackUrl",
+                            videoCodecError,
+                        )
+                    }
+
+                    override fun onRenderedFirstFrame(
+                        eventTime: AnalyticsListener.EventTime,
+                        output: Any,
+                        renderTimeMs: Long,
+                    ) {
+                        registerBackendFirstFrame(
+                            PlayerBackendKind.Exo,
+                            renderTimeMs,
+                        )
+                        Log.i(
+                            PlayerDebugTag,
+                            "first-frame title=$title mediaId=$mediaId option=${activeStreamOption.id} resolved=$resolvedPlaybackUrl renderTimeMs=$renderTimeMs backend=Exo",
+                        )
+                    }
+                }
+            player.addListener(listener)
+            player.addAnalyticsListener(analyticsListener)
+            onDispose {
+                capturePlaybackState()
+                player.removeListener(listener)
+                player.removeAnalyticsListener(analyticsListener)
+                player.release()
             }
         }
-        exoPlayer.addListener(listener)
-        exoPlayer.addAnalyticsListener(analyticsListener)
+    }
+
+    if (keepVlcSession) {
+        DisposableEffect(vlcPlayer) {
+            val player = vlcPlayer
+            onDispose {
+                capturePlaybackState()
+                player.release()
+            }
+        }
+    }
+
+    DisposableEffect(mediaId, source.mediaSourceId, source.playSessionId) {
         onDispose {
-            capturePlaybackState()
-            exoPlayer.removeListener(listener)
-            exoPlayer.removeAnalyticsListener(analyticsListener)
-            exoPlayer.release()
+            reportPlaybackStoppedIfNeeded()
+        }
+    }
+
+    LaunchedEffect(
+        hasRenderedFirstFrame,
+        raceInProgress,
+        activeBackendKind,
+        mediaId,
+        source.mediaSourceId,
+        source.playSessionId,
+    ) {
+        if (hasRenderedFirstFrame && !raceInProgress) {
+            reportPlaybackStartedIfNeeded()
+        }
+    }
+
+    LaunchedEffect(
+        playbackStartedReported,
+        playbackStoppedReported,
+        mediaId,
+        source.mediaSourceId,
+        source.playSessionId,
+    ) {
+        if (!playbackStartedReported || playbackStoppedReported) {
+            return@LaunchedEffect
+        }
+        while (playbackStartedReported && !playbackStoppedReported) {
+            delay(10_000)
+            reportPlaybackProgressEvent(eventName = "TimeUpdate")
         }
     }
 
     LaunchedEffect(activeStreamOption.id) {
+        autoFallbackInProgress = false
+        hasRenderedFirstFrame = false
         bitrateEstimateBitsPerSecond = 0L
+        resolvedPlaybackUrl = activeStreamOption.streamUrl
+        activeBackendKindName = preferredBackendKind.name
+        raceResolved = !experimentalDualBackendRace
+        exoFirstFrameAtMs = 0L
+        vlcFirstFrameAtMs = 0L
+        Log.i(
+            PlayerDebugTag,
+            "starting title=$title mediaId=$mediaId option=${activeStreamOption.id} entry=${activeStreamOption.streamUrl}",
+        )
     }
 
-    LaunchedEffect(exoPlayer, playbackTrafficTracker) {
+    LaunchedEffect(
+        preferredBackendKind,
+        activeBackendKind,
+        raceInProgress,
+        exoPlayer,
+        vlcPlayer,
+        activeStreamOption.id,
+    ) {
+        delay(12_000)
+        if (
+            !hasRenderedFirstFrame &&
+            shouldExpectPlaybackToStart() &&
+            playbackStateSnapshot() != Player.STATE_ENDED
+        ) {
+            if (activeBackendKind == PlayerBackendKind.Exo && sourceRequiresCompatibilityBackend) {
+                forceCompatibilityBackend("老封装起播超时")
+                return@LaunchedEffect
+            }
+            Log.w(
+                PlayerDebugTag,
+                "startup timeout title=$title mediaId=$mediaId option=${activeStreamOption.id} backend=$activeBackendKind race=$raceInProgress state=${playbackStateSnapshot()} bytes=${playbackTrafficTracker.totalBytesRead()} entry=${activeStreamOption.streamUrl} resolved=$resolvedPlaybackUrl",
+            )
+            if (!attemptAutoFallback("起播超时")) {
+                mainHandler.post {
+                    Toast.makeText(
+                        context.applicationContext,
+                        "当前片源长时间未起播，请切换播放方式再试",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(
+        activeBackendKind,
+        raceInProgress,
+        exoPlayer,
+        vlcPlayer,
+        playbackTrafficTracker,
+        activeStreamOption.id,
+    ) {
         var previousBytesRead = playbackTrafficTracker.totalBytesRead()
         var previousSampleTimeMs = SystemClock.elapsedRealtime()
         var smoothedBitrateBitsPerSecond = 0L
         var lastNonZeroSampleTimeMs = previousSampleTimeMs
         while (true) {
-            val duration = exoPlayer.duration.takeIf { it != C.TIME_UNSET } ?: 0L
-            durationMs = duration.coerceAtLeast(0L)
-            bufferedPositionMs = exoPlayer.bufferedPosition.coerceAtLeast(0L)
-            isPlaying = exoPlayer.isPlaying
-            isBuffering = exoPlayer.playbackState == Player.STATE_BUFFERING
-            if (!isScrubbing) {
-                currentPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
+            vlcPlayer?.syncState()
+            if (vlcPlayer?.hasRenderedFirstFrame == true && vlcFirstFrameAtMs == 0L) {
+                registerBackendFirstFrame(PlayerBackendKind.Vlc, null)
             }
-            val nowMs = SystemClock.elapsedRealtime()
-            val totalBytesRead = playbackTrafficTracker.totalBytesRead()
-            val bytesDelta = (totalBytesRead - previousBytesRead).coerceAtLeast(0L)
-            val timeDeltaMs = (nowMs - previousSampleTimeMs).coerceAtLeast(1L)
-            if (bytesDelta > 0L) {
-                val instantBitrate = bytesDelta * 8_000L / timeDeltaMs
-                smoothedBitrateBitsPerSecond = when {
-                    smoothedBitrateBitsPerSecond <= 0L -> instantBitrate
-                    else -> ((smoothedBitrateBitsPerSecond * 0.58) + (instantBitrate * 0.42)).toLong()
+            if (!experimentalDualBackendRace || raceInProgress || activeBackendKind == PlayerBackendKind.Vlc) {
+                if (activeBackendKind == PlayerBackendKind.Vlc) {
+                    durationMs = durationSnapshot()
+                    bufferedPositionMs = bufferedPositionSnapshot()
+                    isPlaying = isPlayingSnapshot()
+                    isBuffering = isBufferingSnapshot()
+                    if (!isScrubbing) {
+                        currentPositionMs = currentPositionSnapshot()
+                    }
+                    bitrateEstimateBitsPerSecond = vlcPlayer?.bitrateEstimateBitsPerSecond?.coerceAtLeast(0L) ?: 0L
+                    resolvedPlaybackUrl = vlcPlayer?.resolvedPlaybackUrl?.ifBlank { activeStreamOption.streamUrl }
+                        ?: activeStreamOption.streamUrl
+                    hasRenderedFirstFrame = vlcFirstFrameAtMs > 0L
                 }
-                bitrateEstimateBitsPerSecond = smoothedBitrateBitsPerSecond
-                lastNonZeroSampleTimeMs = nowMs
-            } else if (nowMs - lastNonZeroSampleTimeMs > 1_500L) {
-                smoothedBitrateBitsPerSecond = 0L
-                bitrateEstimateBitsPerSecond = 0L
+                vlcPlayer?.consumePendingError()?.let { errorLabel ->
+                    if (experimentalDualBackendRace && !raceResolved) {
+                        promoteRaceBackend(PlayerBackendKind.Exo, errorLabel)
+                    } else if (!attemptAutoFallback(errorLabel)) {
+                        mainHandler.post {
+                            Toast.makeText(
+                                context.applicationContext,
+                                "当前片源暂时无法播放，请切换播放方式再试",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                    }
+                }
             }
-            previousBytesRead = totalBytesRead
-            previousSampleTimeMs = nowMs
+
+            val player = exoPlayer
+            if (player != null) {
+                if (!experimentalDualBackendRace || raceInProgress || activeBackendKind == PlayerBackendKind.Exo) {
+                    val duration = player.duration.takeIf { it != C.TIME_UNSET } ?: 0L
+                    durationMs = duration.coerceAtLeast(0L)
+                    bufferedPositionMs = player.bufferedPosition.coerceAtLeast(0L)
+                    isPlaying = player.isPlaying
+                    isBuffering = player.playbackState == Player.STATE_BUFFERING
+                    if (!isScrubbing) {
+                        currentPositionMs = player.currentPosition.coerceAtLeast(0L)
+                    }
+                    hasRenderedFirstFrame = exoFirstFrameAtMs > 0L
+                }
+                val nowMs = SystemClock.elapsedRealtime()
+                val totalBytesRead = playbackTrafficTracker.totalBytesRead()
+                val bytesDelta = (totalBytesRead - previousBytesRead).coerceAtLeast(0L)
+                val timeDeltaMs = (nowMs - previousSampleTimeMs).coerceAtLeast(1L)
+                if (bytesDelta > 0L) {
+                    val instantBitrate = bytesDelta * 8_000L / timeDeltaMs
+                    smoothedBitrateBitsPerSecond = when {
+                        smoothedBitrateBitsPerSecond <= 0L -> instantBitrate
+                        else -> ((smoothedBitrateBitsPerSecond * 0.58) + (instantBitrate * 0.42)).toLong()
+                    }
+                    if (activeBackendKind == PlayerBackendKind.Exo || raceInProgress) {
+                        bitrateEstimateBitsPerSecond = smoothedBitrateBitsPerSecond
+                    }
+                    lastNonZeroSampleTimeMs = nowMs
+                } else if (nowMs - lastNonZeroSampleTimeMs > 1_500L) {
+                    smoothedBitrateBitsPerSecond = 0L
+                    if (activeBackendKind == PlayerBackendKind.Exo || raceInProgress) {
+                        bitrateEstimateBitsPerSecond = 0L
+                    }
+                }
+                previousBytesRead = totalBytesRead
+                previousSampleTimeMs = nowMs
+            }
             delay(250)
         }
     }
 
-    LaunchedEffect(exoPlayer, playbackSpeed) {
-        exoPlayer.playbackParameters = PlaybackParameters(playbackSpeed)
+    LaunchedEffect(activeBackendKind, raceInProgress, exoPlayer, vlcPlayer, playbackSpeed) {
+        if (raceInProgress) {
+            vlcPlayer?.setPlaybackSpeed(currentPlaybackSpeedTarget())
+            exoPlayer?.playbackParameters = PlaybackParameters(currentPlaybackSpeedTarget())
+        } else {
+            when (activeBackendKind) {
+                PlayerBackendKind.Vlc -> vlcPlayer?.setPlaybackSpeed(currentPlaybackSpeedTarget())
+                PlayerBackendKind.Exo -> exoPlayer?.playbackParameters = PlaybackParameters(currentPlaybackSpeedTarget())
+            }
+        }
     }
 
     DisposableEffect(activity, isLandscapeFullscreen) {
@@ -528,28 +1251,46 @@ fun PlayerScreen(
             .fillMaxSize()
             .background(Color.Black),
     ) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { viewContext ->
-                PlayerView(viewContext).apply {
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                    )
-                    useController = false
-                    setResizeMode(scaleMode.resizeMode)
-                    setBackgroundColor(android.graphics.Color.BLACK)
-                    setShutterBackgroundColor(android.graphics.Color.BLACK)
-                    player = exoPlayer
-                }
-            },
-            update = { playerView ->
-                playerView.setResizeMode(scaleMode.resizeMode)
-                playerView.setBackgroundColor(android.graphics.Color.BLACK)
-                playerView.setShutterBackgroundColor(android.graphics.Color.BLACK)
-                playerView.player = exoPlayer
-            },
-        )
+        if (keepExoSession) {
+            AndroidView(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        alpha = if (raceInProgress) 0f else if (activeBackendKind == PlayerBackendKind.Exo) 1f else 0f
+                    },
+                factory = { viewContext ->
+                    PlayerView(viewContext).apply {
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                        )
+                        useController = false
+                        setResizeMode(scaleMode.resizeMode)
+                        setBackgroundColor(android.graphics.Color.BLACK)
+                        setShutterBackgroundColor(android.graphics.Color.BLACK)
+                        player = requireNotNull(exoPlayer)
+                    }
+                },
+                update = { playerView ->
+                    playerView.setResizeMode(scaleMode.resizeMode)
+                    playerView.setBackgroundColor(android.graphics.Color.BLACK)
+                    playerView.setShutterBackgroundColor(android.graphics.Color.BLACK)
+                    playerView.player = exoPlayer
+                },
+            )
+        }
+
+        if (keepVlcSession) {
+            AndroidView(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        alpha = if (raceInProgress) 0f else if (activeBackendKind == PlayerBackendKind.Vlc) 1f else 0f
+                    },
+                factory = { requireNotNull(vlcPlayer).view },
+                update = {},
+            )
+        }
 
         AnimatedVisibility(
             visible = controlsVisible && !controlsLocked,
@@ -617,7 +1358,7 @@ fun PlayerScreen(
                             startBrightness = activity?.resolvePlayerBrightness() ?: 0.5f
                             maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
                             startVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-                            seekBasePosition = exoPlayer.currentPosition.coerceAtLeast(0L)
+                            seekBasePosition = currentPositionSnapshot()
                             gestureActive = true
                             gestureOverlayState = null
                         },
@@ -686,7 +1427,7 @@ fun PlayerScreen(
                         onDragEnd = {
                             if (gestureMode == PlayerGestureMode.Seek) {
                                 isScrubbing = false
-                                exoPlayer.seekTo(sliderPositionMs.toLong())
+                                seekToPlayback(sliderPositionMs.toLong())
                             }
                             gestureActive = false
                         },
@@ -760,8 +1501,8 @@ fun PlayerScreen(
                             .padding(horizontal = 18.dp, vertical = 14.dp),
                         onClose = {
                             onClose(
-                                exoPlayer.currentPosition.coerceAtLeast(0L),
-                                (exoPlayer.duration.takeIf { it != C.TIME_UNSET } ?: durationMs).coerceAtLeast(0L),
+                                currentPositionSnapshot(),
+                                durationSnapshot(),
                             )
                         },
                         onToggleLock = {
@@ -794,10 +1535,12 @@ fun PlayerScreen(
                         },
                         onDecreaseSpeed = {
                             playbackSpeed = (playbackSpeed - 0.25f).coerceAtLeast(0.5f)
+                            reportPlaybackProgressEvent("PlaybackRateChange")
                             revealControls()
                         },
                         onIncreaseSpeed = {
                             playbackSpeed = (playbackSpeed + 0.25f).coerceAtMost(2.0f)
+                            reportPlaybackProgressEvent("PlaybackRateChange")
                             revealControls()
                         },
                     )
@@ -826,6 +1569,7 @@ fun PlayerScreen(
                                 onSelectSubtitle = { targetIndex ->
                                     capturePlaybackState()
                                     selectedSubtitleIndex = targetIndex
+                                    reportPlaybackProgressEvent("SubtitleTrackChange")
                                     showSubtitleSheet = false
                                     revealControls()
                                 },
@@ -849,6 +1593,7 @@ fun PlayerScreen(
                                     if (optionId == activeStreamOption.id) return@PlayerRuntimeSheet
                                     capturePlaybackState()
                                     selectedStreamOptionId = optionId
+                                    reportPlaybackProgressEvent("QualityChange")
                                     revealControls()
                                 },
                                 bitrateLabel = formatBitrate(bitrateEstimateBitsPerSecond),
@@ -883,7 +1628,8 @@ fun PlayerScreen(
                         },
                         onScrubStop = {
                             isScrubbing = false
-                            exoPlayer.seekTo(sliderPositionMs.toLong())
+                            seekToPlayback(sliderPositionMs.toLong())
+                            reportPlaybackProgressEvent("TimeUpdate", sliderPositionMs.toLong())
                             revealControls()
                         },
                         onOpenInfoSheet = {
@@ -894,19 +1640,19 @@ fun PlayerScreen(
                             }
                         },
                         onSeekBack = {
-                            exoPlayer.seekBack()
+                            seekBackPlayback()
+                            reportPlaybackProgressEvent("TimeUpdate")
                             revealControls()
                         },
                         onPlayPause = {
-                            if (exoPlayer.isPlaying) {
-                                exoPlayer.pause()
-                            } else {
-                                exoPlayer.play()
-                            }
+                            val pauseEvent = if (isPlayingSnapshot()) "Pause" else "Unpause"
+                            togglePlayPausePlayback()
+                            reportPlaybackProgressEvent(pauseEvent)
                             revealControls()
                         },
                         onSeekForward = {
-                            exoPlayer.seekForward()
+                            seekForwardPlayback()
+                            reportPlaybackProgressEvent("TimeUpdate")
                             revealControls()
                         },
                         onOpenRuntime = {
@@ -948,7 +1694,13 @@ private enum class PlayerScaleMode(
     }
 }
 
+private enum class PlayerBackendKind {
+    Exo,
+    Vlc,
+}
+
 private data class PlayerRuntimeProfile(
+    val backendKind: PlayerBackendKind,
     val label: String,
     val decoderFallback: Boolean,
     val minBufferMs: Int,
@@ -2053,9 +2805,114 @@ private fun buildSeekGestureOverlay(
 
 private fun formatSpeed(value: Float): String = String.format(Locale.US, "%.2fx", value)
 
+private fun shouldForceVlcSoftwareDecode(
+    container: String,
+    videoCodec: String,
+): Boolean {
+    val normalizedContainer = container.trim().lowercase(Locale.US)
+    val normalizedCodec = videoCodec.trim().lowercase(Locale.US)
+    return normalizedContainer in setOf(
+        "avi",
+        "flv",
+        "gif",
+        "mpg",
+        "mpeg",
+        "rm",
+        "rmvb",
+        "swf",
+        "vob",
+        "wmv",
+    ) || normalizedCodec in setOf(
+        "flv1",
+        "gif",
+        "mpeg1video",
+        "mpeg2video",
+        "rv30",
+        "rv40",
+        "vc1",
+        "wmv1",
+        "wmv2",
+        "wmv3",
+    )
+}
+
+private fun shouldPreferCompatibilityBackend(
+    container: String,
+    videoCodec: String,
+): Boolean {
+    val normalizedContainer = container.trim().lowercase(Locale.US)
+    val normalizedCodec = videoCodec.trim().lowercase(Locale.US)
+    return normalizedContainer in setOf(
+        "3gp",
+        "avi",
+        "flv",
+        "gif",
+        "mpg",
+        "mpeg",
+        "rm",
+        "rmvb",
+        "swf",
+        "ts",
+        "vob",
+        "wmv",
+    ) || normalizedCodec in setOf(
+        "flv1",
+        "gif",
+        "mpeg1video",
+        "mpeg2video",
+        "rv30",
+        "rv40",
+        "vc1",
+        "wmv1",
+        "wmv2",
+        "wmv3",
+    )
+}
+
+private fun shouldUseDualBackendRace(
+    container: String,
+    videoCodec: String,
+    audioCodec: String,
+    infoLine: String,
+): Boolean {
+    val normalizedContainer = container.trim().lowercase(Locale.US)
+    val normalizedVideoCodec = videoCodec.trim().lowercase(Locale.US)
+    val normalizedAudioCodec = audioCodec.trim().lowercase(Locale.US)
+    val normalizedInfoLine = infoLine.trim().lowercase(Locale.US)
+
+    val commonContainer = normalizedContainer in setOf(
+        "m4v",
+        "mkv",
+        "mov",
+        "mp4",
+        "webm",
+    )
+    val modernVideoRisk = normalizedVideoCodec in setOf(
+        "av1",
+        "h265",
+        "hevc",
+        "vp9",
+    )
+    val audioRisk = normalizedAudioCodec in setOf(
+        "amr_nb",
+        "amr_wb",
+        "cook",
+        "mp2",
+        "pcm_alaw",
+        "pcm_mulaw",
+        "wmav1",
+        "wmav2",
+    )
+    val networkHint = normalizedInfoLine.contains("strm") ||
+        normalizedInfoLine.contains("网络直链") ||
+        normalizedInfoLine.contains("direct")
+
+    return modernVideoRisk || audioRisk || (commonContainer && networkHint)
+}
+
 private fun runtimeModeDescription(label: String): String = when (label) {
-    PLAYER_MODE_SYSTEM -> "更贴近系统播放器，启动快，直解优先，遇到挑片源时兼容性会更敏感。"
-    PLAYER_MODE_COMPATIBILITY -> "兼容性最高，遇到特殊封装或奇怪片源时优先用这个，代价是更偏保守。"
+    PLAYER_MODE_SYSTEM -> "更贴近系统直解，起播更快，适合常见 MP4 / MKV / HLS 源流。"
+    PLAYER_MODE_COMPATIBILITY -> "使用 VLC 兼容内核，优先兜住挑封装、老编码和 Exo 难解的片源。"
     else -> "均衡模式，兼顾启动速度、兼容性和日常播放稳定性。"
 }
 
@@ -2086,6 +2943,7 @@ private fun Activity.applyPlayerBrightness(value: Float) {
 
 private fun AppSettings.toPlayerRuntimeProfile(): PlayerRuntimeProfile = when (playerMode) {
     PLAYER_MODE_COMPATIBILITY -> PlayerRuntimeProfile(
+        backendKind = PlayerBackendKind.Vlc,
         label = PLAYER_MODE_COMPATIBILITY,
         decoderFallback = true,
         minBufferMs = 18_000,
@@ -2097,6 +2955,7 @@ private fun AppSettings.toPlayerRuntimeProfile(): PlayerRuntimeProfile = when (p
     )
 
     PLAYER_MODE_SYSTEM -> PlayerRuntimeProfile(
+        backendKind = PlayerBackendKind.Exo,
         label = PLAYER_MODE_SYSTEM,
         decoderFallback = false,
         minBufferMs = 6_000,
@@ -2108,6 +2967,7 @@ private fun AppSettings.toPlayerRuntimeProfile(): PlayerRuntimeProfile = when (p
     )
 
     else -> PlayerRuntimeProfile(
+        backendKind = PlayerBackendKind.Exo,
         label = PLAYER_MODE_STANDARD,
         decoderFallback = true,
         minBufferMs = 12_000,

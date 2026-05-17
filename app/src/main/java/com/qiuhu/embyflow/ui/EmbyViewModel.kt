@@ -1,10 +1,13 @@
 package com.qiuhu.embyflow.ui
 
 import android.app.Application
+import android.os.SystemClock
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.qiuhu.embyflow.BuildConfig
 import com.qiuhu.embyflow.data.emby.EmbyBootstrapResult
+import com.qiuhu.embyflow.data.emby.EmbyPlaybackSessionState
 import com.qiuhu.embyflow.data.emby.EmbyPlaybackSource
 import com.qiuhu.embyflow.data.emby.EmbyRepository
 import com.qiuhu.embyflow.data.emby.EmbySession
@@ -23,9 +26,14 @@ import com.qiuhu.embyflow.model.MediaTag
 import com.qiuhu.embyflow.model.SampleCatalog
 import com.qiuhu.embyflow.model.ServerProfile
 import com.qiuhu.embyflow.model.ServerProfilesState
+import com.qiuhu.embyflow.model.isSeason
 import com.qiuhu.embyflow.model.isSeries
 import com.qiuhu.embyflow.model.normalized
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -99,6 +107,9 @@ data class SeriesDetailState(
     val errorMessage: String? = null,
 )
 
+private const val PlaybackWarmupDebugTag = "AurePPlaybackWarmup"
+private const val PlaybackLoadingGateDelayMs = 180L
+
 class EmbyViewModel(
     application: Application,
 ) : AndroidViewModel(application) {
@@ -113,6 +124,9 @@ class EmbyViewModel(
     private var cachedResumeEntries: List<ContinueWatchingEntry> = emptyList()
     private var localResumeItems: List<MediaItem> = emptyList()
     private val detailLoadingIds = mutableSetOf<String>()
+    private val playbackSourceCache = mutableMapOf<String, EmbyPlaybackSource>()
+    private val playbackSourceJobs = mutableMapOf<String, Deferred<Result<EmbyPlaybackSource>>>()
+    private var playbackRequestGeneration: Long = 0L
     private var searchJob: Job? = null
     private var searchGeneration: Long = 0L
 
@@ -158,8 +172,28 @@ class EmbyViewModel(
     fun openPlayer(media: MediaItem) {
         val activeSession = session ?: return
         val repository = repository ?: return
-        _playbackState.value = PlaybackUiState.Loading(media)
+        val requestGeneration = ++playbackRequestGeneration
+        val cachedDirectSource = media
+            .takeIf(::canWarmPlaybackSource)
+            ?.let { playbackSourceCache[it.id] }
+        if (cachedDirectSource != null) {
+            _playbackState.value = PlaybackUiState.Ready(
+                media = media,
+                source = cachedDirectSource,
+                initialPositionMs = media.resumePositionMs
+                    .takeIf { it > 0L }
+                    ?: resolveScopedResumePosition(media.id),
+            )
+            return
+        }
         viewModelScope.launch {
+            val loadingGate = launch {
+                delay(PlaybackLoadingGateDelayMs)
+                if (requestGeneration == playbackRequestGeneration) {
+                    _playbackState.value = PlaybackUiState.Loading(media)
+                }
+            }
+            val startMs = SystemClock.elapsedRealtime()
             runCatching {
                 val playableMedia = repository.resolvePlayableItem(
                     userId = activeSession.userId,
@@ -169,20 +203,38 @@ class EmbyViewModel(
                 val initialPositionMs = playableMedia.resumePositionMs
                     .takeIf { it > 0L }
                     ?: resolveScopedResumePosition(playableMedia.id)
-                val source = repository.loadPlaybackSource(
-                    userId = activeSession.userId,
-                    token = activeSession.accessToken,
-                    itemId = playableMedia.id,
+                val source = awaitPlaybackSource(
+                    activeSession = activeSession,
+                    repository = repository,
+                    media = playableMedia,
                     fallbackTitle = playableMedia.title.ifBlank { media.title },
+                    trigger = "open-player",
                 )
                 Triple(playableMedia, source, initialPositionMs)
             }.onSuccess { (playableMedia, source, initialPositionMs) ->
+                loadingGate.cancel()
+                if (requestGeneration != playbackRequestGeneration) {
+                    return@onSuccess
+                }
+                Log.i(
+                    PlaybackWarmupDebugTag,
+                    "open ready itemId=${playableMedia.id} title=${playableMedia.title} elapsedMs=${SystemClock.elapsedRealtime() - startMs}",
+                )
                 _playbackState.value = PlaybackUiState.Ready(
                     media = playableMedia,
                     source = source,
                     initialPositionMs = initialPositionMs,
                 )
             }.onFailure { throwable ->
+                loadingGate.cancel()
+                if (requestGeneration != playbackRequestGeneration) {
+                    return@onFailure
+                }
+                Log.w(
+                    PlaybackWarmupDebugTag,
+                    "open failed itemId=${media.id} title=${media.title} elapsedMs=${SystemClock.elapsedRealtime() - startMs}",
+                    throwable,
+                )
                 _playbackState.value = PlaybackUiState.Error(
                     throwable.message ?: "无法创建播放地址",
                 )
@@ -194,6 +246,7 @@ class EmbyViewModel(
         positionMs: Long = 0L,
         durationMs: Long = 0L,
     ) {
+        playbackRequestGeneration += 1L
         val activeMedia = when (val state = _playbackState.value) {
             is PlaybackUiState.Loading -> state.media
             is PlaybackUiState.Ready -> state.media
@@ -219,6 +272,62 @@ class EmbyViewModel(
         }
 
         _playbackState.value = PlaybackUiState.Idle
+    }
+
+    fun reportPlaybackStarted(state: EmbyPlaybackSessionState) {
+        val activeSession = session ?: return
+        val repository = repository ?: return
+        viewModelScope.launch {
+            runCatching {
+                repository.reportPlaybackStarted(
+                    userId = activeSession.userId,
+                    token = activeSession.accessToken,
+                    state = state,
+                )
+            }.onFailure { throwable ->
+                Log.w("AurePPlaybackSession", "report start failed itemId=${state.itemId}", throwable)
+            }
+        }
+    }
+
+    fun reportPlaybackProgress(
+        state: EmbyPlaybackSessionState,
+        eventName: String,
+    ) {
+        val activeSession = session ?: return
+        val repository = repository ?: return
+        viewModelScope.launch {
+            runCatching {
+                repository.reportPlaybackProgress(
+                    userId = activeSession.userId,
+                    token = activeSession.accessToken,
+                    state = state,
+                    eventName = eventName,
+                )
+            }.onFailure { throwable ->
+                Log.w(
+                    "AurePPlaybackSession",
+                    "report progress failed itemId=${state.itemId} event=$eventName",
+                    throwable,
+                )
+            }
+        }
+    }
+
+    fun reportPlaybackStopped(state: EmbyPlaybackSessionState) {
+        val activeSession = session ?: return
+        val repository = repository ?: return
+        viewModelScope.launch {
+            runCatching {
+                repository.reportPlaybackStopped(
+                    userId = activeSession.userId,
+                    token = activeSession.accessToken,
+                    state = state,
+                )
+            }.onFailure { throwable ->
+                Log.w("AurePPlaybackSession", "report stop failed itemId=${state.itemId}", throwable)
+            }
+        }
     }
 
     fun updatePlayerMode(value: String) {
@@ -272,6 +381,20 @@ class EmbyViewModel(
                 updateSelection = false,
                 append = false,
             )
+        }
+    }
+
+    fun updateExperimentalDualBackendRace(value: Boolean) {
+        if (_settings.value.experimentalDualBackendRace == value) {
+            return
+        }
+
+        _settings.update { current ->
+            current.copy(experimentalDualBackendRace = value)
+        }
+
+        viewModelScope.launch {
+            settingsStore.updateExperimentalDualBackendRace(value)
         }
     }
 
@@ -516,6 +639,7 @@ class EmbyViewModel(
                 scopedResumePosition,
             ),
         )
+        prefetchPlaybackSourceIfPossible(cachedMedia)
         if (cachedMedia.isSeries) {
             loadSeriesDetail(cachedMedia.id)
         }
@@ -546,6 +670,7 @@ class EmbyViewModel(
                         scopedResumePosition,
                     ),
                 )
+                prefetchPlaybackSourceIfPossible(mergedDetail)
                 _mediaDetails.update { current -> current + (mergedDetail.id to mergedDetail) }
                 if (mergedDetail.isSeries) {
                     loadSeriesDetail(mergedDetail.id)
@@ -688,6 +813,8 @@ class EmbyViewModel(
                     seriesId = seriesId,
                 )
             }.onSuccess { content ->
+                content.nextUpEpisode?.let(::prefetchPlaybackSourceIfPossible)
+                    ?: content.episodes.firstOrNull()?.let(::prefetchPlaybackSourceIfPossible)
                 _seriesDetails.update { state ->
                     state + (
                         seriesId to SeriesDetailState(
@@ -732,6 +859,7 @@ class EmbyViewModel(
                 session = null
                 repository = null
                 serverPayload = null
+                clearPlaybackPreparationCache()
                 syncScopedResumeItems()
                 _uiState.value = EmbyUiState.Error(
                     title = "还没有配置服务器",
@@ -749,6 +877,7 @@ class EmbyViewModel(
                 session = null
                 repository = null
                 serverPayload = null
+                clearPlaybackPreparationCache()
                 syncScopedResumeItems()
                 _uiState.value = EmbyUiState.Error(
                     title = "服务器配置不完整",
@@ -759,6 +888,7 @@ class EmbyViewModel(
 
             val activeRepository = EmbyRepository(activeProfile.serverUrl)
             activeServerProfileId = activeProfile.id
+            clearPlaybackPreparationCache()
             repository = activeRepository
             session = null
             syncScopedResumeItems()
@@ -791,6 +921,7 @@ class EmbyViewModel(
             }.onFailure { throwable ->
                 session = null
                 serverPayload = null
+                clearPlaybackPreparationCache()
                 syncScopedResumeItems()
                 _uiState.value = EmbyUiState.Error(
                     title = "连接 Emby 失败",
@@ -859,6 +990,110 @@ class EmbyViewModel(
             ?.positionMs
             ?.coerceAtLeast(0L)
             ?: 0L
+    }
+
+    private fun clearPlaybackPreparationCache() {
+        playbackSourceJobs.values.forEach { deferred ->
+            if (deferred.isActive) {
+                deferred.cancel()
+            }
+        }
+        playbackSourceJobs.clear()
+        playbackSourceCache.clear()
+    }
+
+    private fun canWarmPlaybackSource(media: MediaItem): Boolean {
+        return media.id.isNotBlank() &&
+            !media.isFolder &&
+            !media.isSeries &&
+            !media.isSeason
+    }
+
+    private fun prefetchPlaybackSourceIfPossible(media: MediaItem) {
+        val activeSession = session ?: return
+        val repository = repository ?: return
+        if (!canWarmPlaybackSource(media)) {
+            return
+        }
+        startPlaybackSourceRequest(
+            activeSession = activeSession,
+            repository = repository,
+            media = media,
+            fallbackTitle = media.title,
+            trigger = "prefetch",
+        )
+    }
+
+    private suspend fun awaitPlaybackSource(
+        activeSession: EmbySession,
+        repository: EmbyRepository,
+        media: MediaItem,
+        fallbackTitle: String,
+        trigger: String,
+    ): EmbyPlaybackSource {
+        playbackSourceCache[media.id]?.let { cached ->
+            return cached
+        }
+        return startPlaybackSourceRequest(
+            activeSession = activeSession,
+            repository = repository,
+            media = media,
+            fallbackTitle = fallbackTitle,
+            trigger = trigger,
+        ).await().getOrThrow()
+    }
+
+    private fun startPlaybackSourceRequest(
+        activeSession: EmbySession,
+        repository: EmbyRepository,
+        media: MediaItem,
+        fallbackTitle: String,
+        trigger: String,
+    ): Deferred<Result<EmbyPlaybackSource>> {
+        playbackSourceCache[media.id]?.let { cached ->
+            return CompletableDeferred(Result.success(cached))
+        }
+
+        playbackSourceJobs[media.id]?.let { existing ->
+            return existing
+        }
+
+        val deferred = viewModelScope.async(Dispatchers.IO) {
+            val startMs = SystemClock.elapsedRealtime()
+            runCatching {
+                repository.loadPlaybackSource(
+                    userId = activeSession.userId,
+                    token = activeSession.accessToken,
+                    itemId = media.id,
+                    fallbackTitle = fallbackTitle,
+                )
+            }.also { result ->
+                val elapsedMs = SystemClock.elapsedRealtime() - startMs
+                result.onSuccess {
+                    Log.i(
+                        PlaybackWarmupDebugTag,
+                        "source ready trigger=$trigger itemId=${media.id} title=${fallbackTitle.ifBlank { media.title }} elapsedMs=$elapsedMs",
+                    )
+                }.onFailure { error ->
+                    Log.w(
+                        PlaybackWarmupDebugTag,
+                        "source failed trigger=$trigger itemId=${media.id} title=${fallbackTitle.ifBlank { media.title }} elapsedMs=$elapsedMs",
+                        error,
+                    )
+                }
+            }
+        }
+        playbackSourceJobs[media.id] = deferred
+        viewModelScope.launch {
+            val result = runCatching { deferred.await() }.getOrNull()
+            if (playbackSourceJobs[media.id] === deferred) {
+                playbackSourceJobs.remove(media.id)
+            }
+            result?.onSuccess { source ->
+                playbackSourceCache[media.id] = source
+            }
+        }
+        return deferred
     }
 
     private fun observeServerProfiles() {

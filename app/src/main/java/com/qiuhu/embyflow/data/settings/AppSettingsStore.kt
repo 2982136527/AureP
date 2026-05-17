@@ -19,6 +19,7 @@ data class AppSettings(
     val layoutMode: String = LAYOUT_MODE_DEFAULT,
     val showLibraryCardTitle: Boolean = SHOW_LIBRARY_CARD_TITLE_DEFAULT,
     val librarySortMode: String = LIBRARY_SORT_MODE_DEFAULT,
+    val experimentalDualBackendRace: Boolean = EXPERIMENTAL_DUAL_BACKEND_RACE_DEFAULT,
 )
 
 data class LibrarySortSpec(
@@ -40,6 +41,7 @@ const val SHOW_LIBRARY_CARD_TITLE_DEFAULT = true
 const val LIBRARY_SORT_MODE_DEFAULT = "最近更新"
 const val LIBRARY_SORT_MODE_NAME = "名称 A-Z"
 const val LIBRARY_SORT_MODE_RATING = "评分最高"
+const val EXPERIMENTAL_DUAL_BACKEND_RACE_DEFAULT = false
 
 val LIBRARY_SORT_MODES = listOf(
     LIBRARY_SORT_MODE_DEFAULT,
@@ -105,6 +107,7 @@ class AppSettingsStore(
             layoutMode = normalizeLayoutMode(preferences[Keys.LayoutMode] ?: LAYOUT_MODE_DEFAULT),
             showLibraryCardTitle = preferences[Keys.ShowLibraryCardTitle] ?: SHOW_LIBRARY_CARD_TITLE_DEFAULT,
             librarySortMode = normalizeLibrarySortMode(preferences[Keys.LibrarySortMode] ?: LIBRARY_SORT_MODE_DEFAULT),
+            experimentalDualBackendRace = preferences[Keys.ExperimentalDualBackendRace] ?: EXPERIMENTAL_DUAL_BACKEND_RACE_DEFAULT,
         )
     }
 
@@ -130,11 +133,16 @@ class AppSettingsStore(
         dataStore.edit { it[Keys.LibrarySortMode] = normalizeLibrarySortMode(value) }
     }
 
+    suspend fun updateExperimentalDualBackendRace(value: Boolean) {
+        dataStore.edit { it[Keys.ExperimentalDualBackendRace] = value }
+    }
+
     private object Keys {
         val PlayerMode = stringPreferencesKey("player_mode")
         val SubtitleMode = stringPreferencesKey("subtitle_mode")
         val LayoutMode = stringPreferencesKey("layout_mode")
         val ShowLibraryCardTitle = booleanPreferencesKey("show_library_card_title")
         val LibrarySortMode = stringPreferencesKey("library_sort_mode")
+        val ExperimentalDualBackendRace = booleanPreferencesKey("experimental_dual_backend_race")
     }
 }

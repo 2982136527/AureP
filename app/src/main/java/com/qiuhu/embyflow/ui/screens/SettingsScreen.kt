@@ -130,6 +130,7 @@ fun SettingsScreen(
     onUpdateSubtitleMode: (String) -> Unit,
     onUpdateLayoutMode: (String) -> Unit,
     onUpdateShowLibraryCardTitle: (Boolean) -> Unit,
+    onUpdateExperimentalDualBackendRace: (Boolean) -> Unit,
     onSaveServerProfile: (ServerProfile) -> Unit,
     onDeleteServerProfile: (String) -> Unit,
     onActivateServerProfile: (String) -> Unit,
@@ -263,7 +264,7 @@ fun SettingsScreen(
 
         SettingsSheetKey.Player -> SettingsSheetModel(
             title = "播放策略",
-            subtitle = "调整解码回退、缓冲长度与起播速度",
+            subtitle = "切换 Exo 直解与 VLC 兼容内核",
             options = listOf(
                 PLAYER_MODE_COMPATIBILITY,
                 PLAYER_MODE_STANDARD,
@@ -411,6 +412,21 @@ fun SettingsScreen(
                             icon = Icons.Rounded.CollectionsBookmark,
                             checked = settings.showLibraryCardTitle,
                             onToggle = onUpdateShowLibraryCardTitle,
+                        ),
+                    ),
+                )
+            }
+
+            item {
+                SettingsToggleGroup(
+                    title = "实验功能",
+                    rows = listOf(
+                        SettingsToggleRow(
+                            label = "双核竞速",
+                            description = "同时预热 Exo 与 VLC，先出首帧者接管播放，可能更耗电和流量",
+                            icon = Icons.Rounded.Memory,
+                            checked = settings.experimentalDualBackendRace,
+                            onToggle = onUpdateExperimentalDualBackendRace,
                         ),
                     ),
                 )

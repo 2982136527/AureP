@@ -2,6 +2,7 @@ package com.qiuhu.embyflow.data.emby
 
 import android.net.Uri
 import android.util.Log
+import com.qiuhu.embyflow.BuildConfig
 import com.qiuhu.embyflow.data.settings.librarySortSpec
 import com.qiuhu.embyflow.model.EmbyHomePayload
 import com.qiuhu.embyflow.model.MediaItem
@@ -15,6 +16,7 @@ import com.qiuhu.embyflow.model.formatRating
 import com.qiuhu.embyflow.model.placeholderColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
@@ -58,11 +60,29 @@ data class EmbySeriesContent(
 data class EmbyPlaybackSource(
     val streamUrl: String,
     val title: String,
+    val mediaSourceId: String,
+    val playSessionId: String?,
     val infoLine: String = "",
     val infoFields: List<EmbyPlaybackInfoField> = emptyList(),
     val subtitleTracks: List<EmbySubtitleTrack> = emptyList(),
     val streamOptions: List<EmbyPlaybackStreamOption> = emptyList(),
     val selectedStreamOptionId: String? = null,
+)
+
+data class EmbyPlaybackSessionState(
+    val itemId: String,
+    val mediaSourceId: String,
+    val playSessionId: String,
+    val positionMs: Long,
+    val durationMs: Long,
+    val isPaused: Boolean,
+    val playbackRate: Double,
+    val subtitleStreamIndex: Int? = null,
+    val audioStreamIndex: Int? = null,
+    val playMethod: String,
+    val canSeek: Boolean = true,
+    val isMuted: Boolean = false,
+    val volumeLevel: Int? = null,
 )
 
 data class EmbyPlaybackInfoField(
@@ -89,6 +109,110 @@ data class EmbySubtitleTrack(
     val isExternal: Boolean,
 )
 
+@Serializable
+private data class PlaybackInfoRequestDto(
+    val Id: String,
+    val UserId: String,
+    val MaxStreamingBitrate: Long,
+    val MaxAudioChannels: Int? = null,
+    val EnableDirectPlay: Boolean = true,
+    val EnableDirectStream: Boolean = true,
+    val EnableTranscoding: Boolean = true,
+    val AllowVideoStreamCopy: Boolean = true,
+    val AllowAudioStreamCopy: Boolean = true,
+    val AutoOpenLiveStream: Boolean = false,
+    val IsPlayback: Boolean = true,
+    val DeviceProfile: PlaybackDeviceProfileDto? = null,
+)
+
+@Serializable
+private data class PlaybackDeviceProfileDto(
+    val Name: String,
+    val Id: String,
+    val SupportedMediaTypes: String,
+    val MaxStreamingBitrate: Long,
+    val MaxStaticBitrate: Long,
+    val MusicStreamingTranscodingBitrate: Int,
+    val MaxStaticMusicBitrate: Int,
+    val DirectPlayProfiles: List<PlaybackDirectPlayProfileDto>,
+    val TranscodingProfiles: List<PlaybackTranscodingProfileDto>,
+    val CodecProfiles: List<PlaybackCodecProfileDto>,
+    val SubtitleProfiles: List<PlaybackSubtitleProfileDto>,
+)
+
+@Serializable
+private data class PlaybackDirectPlayProfileDto(
+    val Type: String,
+    val Container: String? = null,
+    val AudioCodec: String? = null,
+    val VideoCodec: String? = null,
+)
+
+@Serializable
+private data class PlaybackTranscodingProfileDto(
+    val Container: String,
+    val Type: String,
+    val Protocol: String,
+    val Context: String,
+    val AudioCodec: String? = null,
+    val VideoCodec: String? = null,
+    val EstimateContentLength: Boolean = false,
+    val EnableMpegtsM2TsMode: Boolean = false,
+    val TranscodeSeekInfo: String = "Auto",
+    val CopyTimestamps: Boolean = false,
+    val BreakOnNonKeyFrames: Boolean = false,
+    val AllowInterlacedVideoStreamCopy: Boolean = false,
+    val MaxAudioChannels: String? = null,
+    val SegmentLength: Int = 3,
+    val MinSegments: Int = 1,
+)
+
+@Serializable
+private data class PlaybackCodecProfileDto(
+    val Type: String,
+    val Codec: String,
+    val Conditions: List<PlaybackProfileConditionDto> = emptyList(),
+)
+
+@Serializable
+private data class PlaybackProfileConditionDto(
+    val Condition: String,
+    val Property: String,
+    val Value: String,
+    val IsRequired: Boolean = false,
+)
+
+@Serializable
+private data class PlaybackSubtitleProfileDto(
+    val Format: String,
+    val Method: String,
+)
+
+@Serializable
+private data class PlaybackCheckInDto(
+    val QueueableMediaTypes: List<String> = listOf("Video"),
+    val CanSeek: Boolean = true,
+    val ItemId: String,
+    val MediaSourceId: String,
+    val PositionTicks: Long? = null,
+    val RunTimeTicks: Long? = null,
+    val AudioStreamIndex: Int? = null,
+    val SubtitleStreamIndex: Int? = null,
+    val IsPaused: Boolean,
+    val IsMuted: Boolean = false,
+    val VolumeLevel: Int? = null,
+    val PlayMethod: String,
+    val PlaySessionId: String,
+    val SessionId: String? = null,
+    val LiveStreamId: String? = null,
+    val PlaylistIndex: Int = 0,
+    val PlaylistLength: Int = 1,
+    val SubtitleOffset: Int = 0,
+    val PlaybackRate: Double? = null,
+    val EventName: String? = null,
+    val PlaybackStartTimeTicks: Long? = null,
+)
+
 class EmbyRepository(
     private val serverUrl: String,
     private val json: Json = Json { ignoreUnknownKeys = true },
@@ -98,6 +222,8 @@ class EmbyRepository(
         private const val PlaybackDebugTag = "EmbyFlowPlayback"
         private const val PLAY_SOURCE_QUERY_PARAM = "play_source"
         private const val PLAY_SOURCE_EMBY_PROXY = "emby_proxy"
+        private const val PlaybackDeviceProfileName = "AureP-Android"
+        private const val PlaybackMaxStreamingBitrate = 20_000_000L
     }
 
     @Volatile
@@ -105,7 +231,7 @@ class EmbyRepository(
     private val client = OkHttpClient.Builder().build()
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
     private val authorizationHeader =
-        "MediaBrowser Client=\"EmbyFlow\", Device=\"Android\", DeviceId=\"embyflow-dev\", Version=\"0.1.0\""
+        "MediaBrowser Client=\"AureP\", Device=\"Android\", DeviceId=\"aurep-android\", Version=\"${BuildConfig.VERSION_NAME}\""
     private val browseFields =
         "PrimaryImageAspectRatio,Overview,CommunityRating,PremiereDate,Genres,RunTimeTicks,BackdropImageTags,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber,ProductionYear,OfficialRating,RecursiveItemCount,ChildCount,ParentId"
     private val detailFields = "People,$browseFields"
@@ -265,14 +391,14 @@ class EmbyRepository(
         limit: Int = LibraryPageSize,
     ): EmbyPagedMediaItems = withContext(Dispatchers.IO) {
         val sortSpec = librarySortSpec(sortMode)
-        val includeItemTypes = when (collectionType.lowercase(Locale.US)) {
+        val normalizedCollectionType = collectionType.lowercase(Locale.US)
+        val includeItemTypes = when (normalizedCollectionType) {
             "tvshows" -> "Series"
             else -> "Movie,Episode,Series,Video"
         }
-        val recursive = if (collectionType.equals("tvshows", ignoreCase = true)) "false" else "true"
         val query = listOf(
             "ParentId" to parentId,
-            "Recursive" to recursive,
+            "Recursive" to "true",
             "SortBy" to sortSpec.sortBy,
             "SortOrder" to sortSpec.sortOrder,
             "StartIndex" to startIndex.toString(),
@@ -287,8 +413,13 @@ class EmbyRepository(
             path = "/Users/$userId/Items?$query",
             token = token,
         )
+        val items = result.Items
+            .map { it.toMediaItem(token = token) }
+            .filterNot { media ->
+                normalizedCollectionType == "tvshows" && media.isFolder
+            }
         EmbyPagedMediaItems(
-            items = result.Items.map { it.toMediaItem(token = token) },
+            items = items,
             totalCount = result.TotalRecordCount,
         )
     }
@@ -484,7 +615,10 @@ class EmbyRepository(
         val playbackInfo = post<PlaybackInfoDto>(
             path = "/Items/$itemId/PlaybackInfo?UserId=${userId.urlEncode()}",
             token = token,
-            body = "{}",
+            body = buildPlaybackInfoRequestBody(
+                userId = userId,
+                itemId = itemId,
+            ),
         )
         val source = playbackInfo.MediaSources.firstOrNull()
             ?: throw IllegalStateException("服务端没有返回可播放媒体源")
@@ -497,21 +631,47 @@ class EmbyRepository(
             itemId = itemId,
             baseUrl = baseUrl,
             token = token,
+            playSessionId = playbackInfo.PlaySessionId,
         )
-        val selectedStreamOption = streamOptions.firstOrNull { it.id == "server-direct" }
-            ?: streamOptions.firstOrNull()
+        val selectedStreamOption = streamOptions.firstOrNull()
             ?: throw IllegalStateException("服务端没有返回可用播放链路")
-        Log.d(
+        val primaryVideoStream = source.MediaStreams.firstOrNull { it.Type.equals("Video", ignoreCase = true) }
+        val primaryAudioStream = source.MediaStreams.firstOrNull { it.Type.equals("Audio", ignoreCase = true) }
+        Log.i(
             PlaybackDebugTag,
             buildString {
-                append("itemId=")
+                append("title=")
+                append(source.Name ?: fallbackTitle)
+                append(" itemId=")
                 append(itemId)
+                append(" container=")
+                append(source.Container.orEmpty())
+                append(" video=")
+                append(primaryVideoStream?.Codec.orEmpty())
+                append('/')
+                append(primaryVideoStream?.Profile.orEmpty())
+                append('/')
+                append(primaryVideoStream?.BitDepth ?: 0)
+                append("bit")
+                append(" audio=")
+                append(primaryAudioStream?.Codec.orEmpty())
+                append('/')
+                append(primaryAudioStream?.Channels ?: 0)
+                append("ch")
                 append(" mediaSourceId=")
                 append(source.Id)
                 append(" path=")
                 append(source.Path)
                 append(" directStreamUrl=")
                 append(source.DirectStreamUrl.orEmpty())
+                append(" transcodingUrl=")
+                append(source.TranscodingUrl.orEmpty())
+                append(" isRemote=")
+                append(source.IsRemote)
+                append(" supportsDirectStream=")
+                append(source.SupportsDirectStream)
+                append(" supportsTranscoding=")
+                append(source.SupportsTranscoding)
                 append(" selected=")
                 append(selectedStreamOption.id)
                 append(" -> ")
@@ -528,6 +688,8 @@ class EmbyRepository(
         EmbyPlaybackSource(
             streamUrl = selectedStreamOption.streamUrl,
             title = source.Name ?: fallbackTitle,
+            mediaSourceId = source.Id,
+            playSessionId = playbackInfo.PlaySessionId,
             infoLine = source.buildInfoLine(
                 subtitleCount = subtitleTracks.size,
             ),
@@ -537,6 +699,104 @@ class EmbyRepository(
             subtitleTracks = subtitleTracks,
             streamOptions = streamOptions,
             selectedStreamOptionId = selectedStreamOption.id,
+        )
+    }
+
+    private fun buildPlaybackInfoRequestBody(
+        userId: String,
+        itemId: String,
+    ): String {
+        val request = PlaybackInfoRequestDto(
+            Id = itemId,
+            UserId = userId,
+            MaxStreamingBitrate = PlaybackMaxStreamingBitrate,
+            MaxAudioChannels = 6,
+            AllowVideoStreamCopy = true,
+            AllowAudioStreamCopy = true,
+        )
+        return json.encodeToString(request)
+    }
+
+    suspend fun reportPlaybackStarted(
+        userId: String,
+        token: String,
+        state: EmbyPlaybackSessionState,
+    ) = withContext(Dispatchers.IO) {
+        if (userId.isBlank() || token.isBlank()) return@withContext
+        postEmpty(
+            path = "/Sessions/Playing",
+            token = token,
+            body = json.encodeToString(
+                buildPlaybackCheckInDto(
+                    state = state,
+                    eventName = null,
+                    includePlaybackStartTimeTicks = true,
+                ),
+            ),
+        )
+    }
+
+    suspend fun reportPlaybackProgress(
+        userId: String,
+        token: String,
+        state: EmbyPlaybackSessionState,
+        eventName: String,
+    ) = withContext(Dispatchers.IO) {
+        if (userId.isBlank() || token.isBlank()) return@withContext
+        postEmpty(
+            path = "/Sessions/Playing/Progress",
+            token = token,
+            body = json.encodeToString(
+                buildPlaybackCheckInDto(
+                    state = state,
+                    eventName = eventName,
+                    includePlaybackStartTimeTicks = false,
+                ),
+            ),
+        )
+    }
+
+    suspend fun reportPlaybackStopped(
+        userId: String,
+        token: String,
+        state: EmbyPlaybackSessionState,
+    ) = withContext(Dispatchers.IO) {
+        if (userId.isBlank() || token.isBlank()) return@withContext
+        postEmpty(
+            path = "/Sessions/Playing/Stopped",
+            token = token,
+            body = json.encodeToString(
+                buildPlaybackCheckInDto(
+                    state = state,
+                    eventName = null,
+                    includePlaybackStartTimeTicks = false,
+                ),
+            ),
+        )
+    }
+
+    private fun buildPlaybackCheckInDto(
+        state: EmbyPlaybackSessionState,
+        eventName: String?,
+        includePlaybackStartTimeTicks: Boolean,
+    ): PlaybackCheckInDto {
+        return PlaybackCheckInDto(
+            CanSeek = state.canSeek,
+            ItemId = state.itemId,
+            MediaSourceId = state.mediaSourceId,
+            PositionTicks = state.positionMs.takeIf { it > 0L }?.msToTicks(),
+            RunTimeTicks = state.durationMs.takeIf { it > 0L }?.msToTicks(),
+            AudioStreamIndex = state.audioStreamIndex,
+            SubtitleStreamIndex = state.subtitleStreamIndex,
+            IsPaused = state.isPaused,
+            IsMuted = state.isMuted,
+            VolumeLevel = state.volumeLevel,
+            PlayMethod = state.playMethod,
+            PlaySessionId = state.playSessionId,
+            SessionId = state.playSessionId,
+            PlaybackRate = state.playbackRate,
+            EventName = eventName,
+            PlaybackStartTimeTicks = if (includePlaybackStartTimeTicks) currentDateTimeTicks() else null,
         )
     }
 
@@ -675,6 +935,7 @@ class EmbyRepository(
         val request = Request.Builder()
             .url("$baseUrl$path")
             .header("Accept-Encoding", "identity")
+            .header("X-Emby-Authorization", authorizationHeader)
             .apply {
                 if (token != null) {
                     header("X-Emby-Token", token)
@@ -702,6 +963,7 @@ class EmbyRepository(
         val request = Request.Builder()
             .url("$baseUrl$path")
             .header("Accept-Encoding", "identity")
+            .header("X-Emby-Authorization", authorizationHeader)
             .header("X-Emby-Token", token)
             .build()
 
@@ -727,11 +989,10 @@ class EmbyRepository(
             .url("$baseUrl$path")
             .header("Accept-Encoding", "identity")
             .header("Content-Type", "application/json")
+            .header("X-Emby-Authorization", authorizationHeader)
             .apply {
                 if (token != null) {
                     header("X-Emby-Token", token)
-                } else {
-                    header("X-Emby-Authorization", authorizationHeader)
                 }
             }
             .post(body.toRequestBody(jsonMediaType))
@@ -747,6 +1008,36 @@ class EmbyRepository(
                 throw IllegalStateException("HTTP ${response.code}: $responseBody")
             }
             json.decodeFromString(responseBody)
+        }
+    }
+
+    private fun postEmpty(
+        path: String,
+        token: String? = null,
+        body: String,
+    ) {
+        val request = Request.Builder()
+            .url("$baseUrl$path")
+            .header("Accept-Encoding", "identity")
+            .header("Content-Type", "application/json")
+            .header("X-Emby-Authorization", authorizationHeader)
+            .apply {
+                if (token != null) {
+                    header("X-Emby-Token", token)
+                }
+            }
+            .post(body.toRequestBody(jsonMediaType))
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            updateBaseUrlFromResponse(
+                finalUrl = response.request.url,
+                requestedPath = path,
+            )
+            val responseBody = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IllegalStateException("HTTP ${response.code}: $responseBody")
+            }
         }
     }
 
@@ -945,65 +1236,70 @@ class EmbyRepository(
         itemId: String,
         baseUrl: String,
         token: String,
+        playSessionId: String?,
     ): List<EmbyPlaybackStreamOption> {
+        val requestHeaders = RequiredHttpHeaders.filterKeys { it.isNotBlank() }
+        val directServerOption = resolveServerDirectUrl(baseUrl, token)?.let { directServerUrl ->
+            EmbyPlaybackStreamOption(
+                id = "server-direct",
+                label = "服务器原链",
+                description = "直接使用服务端返回的原始链路，适合可直解片源或已接管的 302 / STRM。",
+                streamUrl = directServerUrl,
+                requestHeaders = requestHeaders,
+            )
+        }
+        val transcodingServerOption = resolveTranscodingUrl(baseUrl, token)?.let { transcodingUrl ->
+            EmbyPlaybackStreamOption(
+                id = "server-transcode",
+                label = "兼容转码",
+                description = "由 Emby 生成兼容链路，遇到 HEVC、10-bit 或特殊音轨时更稳。",
+                streamUrl = transcodingUrl,
+                requestHeaders = requestHeaders,
+            )
+        }
         val managedOptions = listOf(
             EmbyPlaybackStreamOption(
                 id = "emby-direct",
-                label = "直连原流",
+                label = "直连源流",
                 description = "直接请求 Emby 原始视频流，不额外限速。",
                 streamUrl = buildManagedStreamUrl(
                     itemId = itemId,
                     baseUrl = baseUrl,
                     token = token,
+                    playSessionId = playSessionId,
                     static = true,
                     bitrateLimit = null,
                 ),
             ),
-            EmbyPlaybackStreamOption(
-                id = "emby-balanced",
-                label = "12M 均衡串流",
-                description = "由 Emby 管理串流，并限制到 12 Mbps。",
-                streamUrl = buildManagedStreamUrl(
-                    itemId = itemId,
-                    baseUrl = baseUrl,
-                    token = token,
-                    static = false,
-                    bitrateLimit = 12_000_000,
-                ),
-            ),
-            EmbyPlaybackStreamOption(
-                id = "emby-conservative",
-                label = "4M 省流串流",
-                description = "由 Emby 管理串流，并限制到 4 Mbps。",
-                streamUrl = buildManagedStreamUrl(
-                    itemId = itemId,
-                    baseUrl = baseUrl,
-                    token = token,
-                    static = false,
-                    bitrateLimit = 4_000_000,
-                ),
-            ),
         )
-        val directServerUrl = resolveServerDirectUrl(baseUrl)
-        if (directServerUrl != null) {
-            val directOption = EmbyPlaybackStreamOption(
-                id = "server-direct",
-                label = "服务器原链",
-                description = "优先使用服务端返回的 DirectStreamUrl 或原始播放地址，适合接管 original.* / 302 的链路。",
-                streamUrl = directServerUrl,
-                requestHeaders = RequiredHttpHeaders.filterKeys { it.isNotBlank() },
-            )
-            return managedOptions + directOption
+        return (listOfNotNull(directServerOption) + managedOptions + listOfNotNull(transcodingServerOption))
+            .distinctBy { option ->
+            "${option.streamUrl}|${option.requestHeaders}"
         }
-
-        return managedOptions
+            .sortedBy { option -> option.streamPriority() }
     }
 
     private fun PlaybackMediaSourceDto.resolveServerDirectUrl(
         baseUrl: String,
+        token: String,
     ): String? {
-        return DirectStreamUrl.toServerAbsoluteUrl(baseUrl)
+        val directUrl = DirectStreamUrl.toServerAbsoluteUrl(baseUrl)
             ?: Path.toServerAbsoluteUrl(baseUrl)
+            ?: return null
+        return if (AddApiKeyToDirectStreamUrl) {
+            directUrl.appendApiKeyQueryIfMissing(token)
+        } else {
+            directUrl
+        }
+    }
+
+    private fun PlaybackMediaSourceDto.resolveTranscodingUrl(
+        baseUrl: String,
+        token: String,
+    ): String? {
+        return TranscodingUrl
+            .toServerAbsoluteUrl(baseUrl)
+            ?.appendApiKeyQueryIfMissing(token)
     }
 
     private fun String?.toServerAbsoluteUrl(baseUrl: String): String? {
@@ -1013,7 +1309,9 @@ class EmbyRepository(
             candidate.startsWith("http://") || candidate.startsWith("https://") -> {
                 candidate
             }
-            candidate.startsWith("/Videos/") || candidate.startsWith("/play/") -> {
+            candidate.startsWith("/videos/", ignoreCase = true) ||
+                candidate.startsWith("/play/", ignoreCase = true) ||
+                candidate.equals("/play", ignoreCase = true) -> {
                 "${baseUrl.trimEnd('/')}$candidate"
             }
             else -> null
@@ -1021,10 +1319,24 @@ class EmbyRepository(
         return absolute?.ensureEmbyProxyPlaySource()
     }
 
+    private fun String.appendApiKeyQueryIfMissing(token: String): String {
+        val parsed = runCatching { Uri.parse(this) }.getOrNull() ?: return this
+        if (
+            parsed.getQueryParameter("api_key") != null ||
+            parsed.getQueryParameter("X-Emby-Token") != null
+        ) {
+            return this
+        }
+        return parsed.buildUpon()
+            .appendQueryParameter("api_key", token)
+            .build()
+            .toString()
+    }
+
     private fun String.ensureEmbyProxyPlaySource(): String {
         val uri = runCatching { Uri.parse(this) }.getOrNull() ?: return this
         val path = uri.path.orEmpty()
-        if (!path.startsWith("/play/") && !path.equals("/play", ignoreCase = true)) {
+        if (!path.startsWith("/play/", ignoreCase = true) && !path.equals("/play", ignoreCase = true)) {
             return this
         }
         if (uri.getQueryParameter(PLAY_SOURCE_QUERY_PARAM) != null) {
@@ -1040,6 +1352,7 @@ class EmbyRepository(
         itemId: String,
         baseUrl: String,
         token: String,
+        playSessionId: String?,
         static: Boolean,
         bitrateLimit: Int?,
     ): String {
@@ -1054,11 +1367,96 @@ class EmbyRepository(
             append(token.urlEncode())
             append("&MediaSourceId=")
             append(Id.urlEncode())
+            playSessionId
+                ?.takeIf { it.isNotBlank() }
+                ?.let { sessionId ->
+                    append("&PlaySessionId=")
+                    append(sessionId.urlEncode())
+                }
             bitrateLimit?.let { bitrate ->
                 append("&MaxStreamingBitrate=")
                 append(bitrate)
             }
         }
+    }
+
+    private fun EmbyPlaybackStreamOption.streamPriority(): Int = when (id) {
+        "server-direct" -> 0
+        "emby-direct" -> 1
+        "server-transcode" -> 2
+        else -> 99
+    }
+
+    private fun PlaybackMediaSourceDto.isRemoteMediaSource(): Boolean {
+        return IsRemote ||
+            LocationType.equals("Remote", ignoreCase = true) ||
+            Path.startsWith("http://", ignoreCase = true) ||
+            Path.startsWith("https://", ignoreCase = true)
+    }
+
+    private fun PlaybackMediaSourceDto.shouldPreferCompatibilityFirst(): Boolean {
+        val videoStream = MediaStreams.firstOrNull { it.Type.equals("Video", ignoreCase = true) } ?: return false
+        val audioStreams = MediaStreams.filter { it.Type.equals("Audio", ignoreCase = true) }
+        val codec = videoStream.Codec.orEmpty().lowercase(Locale.US)
+        val profile = videoStream.Profile.orEmpty().lowercase(Locale.US)
+        val dynamicRange = videoStream.VideoRange.orEmpty().lowercase(Locale.US)
+        val extendedVideoType = videoStream.ExtendedVideoType.orEmpty().lowercase(Locale.US)
+        val container = Container.orEmpty().lowercase(Locale.US)
+        val path = Path.lowercase(Locale.US)
+
+        val modernCodecRisk =
+            codec in setOf("hevc", "h265", "av1", "vp9") ||
+                (videoStream.BitDepth ?: 8) > 8 ||
+                profile.contains("10") ||
+                dynamicRange.contains("hdr") ||
+                extendedVideoType.isNotBlank()
+
+        if (modernCodecRisk) {
+            return true
+        }
+
+        if (isRemoteMediaSource()) {
+            return false
+        }
+
+        val legacyContainerRisk = container in setOf(
+            "3gp",
+            "avi",
+            "flv",
+            "mpeg",
+            "mpg",
+            "rm",
+            "rmvb",
+            "swf",
+            "ts",
+            "vob",
+            "wmv",
+        ) || path.endsWith(".264")
+        val legacyVideoRisk = codec in setOf(
+            "flv1",
+            "gif",
+            "mpeg1video",
+            "rv30",
+            "rv40",
+            "vc1",
+            "wmv1",
+            "wmv2",
+            "wmv3",
+        )
+        val legacyAudioRisk = audioStreams.any { stream ->
+            stream.Codec.orEmpty().lowercase(Locale.US) in setOf(
+                "amr_nb",
+                "amr_wb",
+                "cook",
+                "mp2",
+                "pcm_alaw",
+                "pcm_mulaw",
+                "wmav1",
+                "wmav2",
+            )
+        }
+
+        return legacyContainerRisk || legacyVideoRisk || legacyAudioRisk
     }
 
     private fun PlaybackMediaSourceDto.buildSubtitleTracks(
@@ -1284,6 +1682,12 @@ class EmbyRepository(
         "Episode" -> "剧集"
         "CollectionFolder" -> "媒体库"
         else -> "视频"
+    }
+
+    private fun Long.msToTicks(): Long = this * 10_000L
+
+    private fun currentDateTimeTicks(): Long {
+        return System.currentTimeMillis() * 10_000L + 621355968000000000L
     }
 }
 
