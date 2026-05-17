@@ -1,0 +1,978 @@
+package com.qiuhu.embyflow.ui
+
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.qiuhu.embyflow.BuildConfig
+import com.qiuhu.embyflow.data.emby.EmbyBootstrapResult
+import com.qiuhu.embyflow.data.emby.EmbyPlaybackSource
+import com.qiuhu.embyflow.data.emby.EmbyRepository
+import com.qiuhu.embyflow.data.emby.EmbySession
+import com.qiuhu.embyflow.data.resume.ContinueWatchingEntry
+import com.qiuhu.embyflow.data.resume.ContinueWatchingStore
+import com.qiuhu.embyflow.data.resume.toMediaItem
+import com.qiuhu.embyflow.data.search.SearchHistoryStore
+import com.qiuhu.embyflow.data.server.ServerProfilesStore
+import com.qiuhu.embyflow.data.settings.AppSettings
+import com.qiuhu.embyflow.data.settings.AppSettingsStore
+import com.qiuhu.embyflow.data.settings.normalizeLibrarySortMode
+import com.qiuhu.embyflow.model.EmbyHomePayload
+import com.qiuhu.embyflow.model.MediaItem
+import com.qiuhu.embyflow.model.MediaPerson
+import com.qiuhu.embyflow.model.MediaTag
+import com.qiuhu.embyflow.model.SampleCatalog
+import com.qiuhu.embyflow.model.ServerProfile
+import com.qiuhu.embyflow.model.ServerProfilesState
+import com.qiuhu.embyflow.model.isSeries
+import com.qiuhu.embyflow.model.normalized
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+sealed interface EmbyUiState {
+    data object Loading : EmbyUiState
+
+    data class Ready(
+        val payload: EmbyHomePayload,
+        val isRefreshingLibrary: Boolean = false,
+        val isAppendingLibrary: Boolean = false,
+    ) : EmbyUiState
+
+    data class Error(
+        val title: String,
+        val detail: String,
+        val fallback: EmbyHomePayload = SampleCatalog.fallbackPayload,
+    ) : EmbyUiState
+}
+
+sealed interface PlaybackUiState {
+    data object Idle : PlaybackUiState
+
+    data class Loading(
+        val media: MediaItem,
+    ) : PlaybackUiState
+
+    data class Ready(
+        val media: MediaItem,
+        val source: EmbyPlaybackSource,
+        val initialPositionMs: Long = 0L,
+    ) : PlaybackUiState
+
+    data class Error(
+        val message: String,
+    ) : PlaybackUiState
+}
+
+data class TagBrowseState(
+    val activeTag: MediaTag? = null,
+    val items: List<MediaItem> = emptyList(),
+    val isLoading: Boolean = false,
+    val errorMessage: String? = null,
+)
+
+data class ActorBrowseState(
+    val activeActor: MediaPerson? = null,
+    val items: List<MediaItem> = emptyList(),
+    val isLoading: Boolean = false,
+    val errorMessage: String? = null,
+)
+
+data class SearchState(
+    val query: String = "",
+    val results: List<MediaItem> = emptyList(),
+    val recentQueries: List<String> = emptyList(),
+    val isLoading: Boolean = false,
+    val errorMessage: String? = null,
+)
+
+data class SeriesDetailState(
+    val seasons: List<MediaItem> = emptyList(),
+    val selectedSeasonId: String? = null,
+    val episodes: List<MediaItem> = emptyList(),
+    val nextUpEpisode: MediaItem? = null,
+    val isLoading: Boolean = false,
+    val errorMessage: String? = null,
+)
+
+class EmbyViewModel(
+    application: Application,
+) : AndroidViewModel(application) {
+    private var repository: EmbyRepository? = null
+    private val settingsStore = AppSettingsStore(application.applicationContext)
+    private val continueWatchingStore = ContinueWatchingStore(application.applicationContext)
+    private val searchHistoryStore = SearchHistoryStore(application.applicationContext)
+    private val serverProfilesStore = ServerProfilesStore(application.applicationContext)
+    private var session: EmbySession? = null
+    private var serverPayload: EmbyHomePayload? = null
+    private var activeServerProfileId: String? = null
+    private var cachedResumeEntries: List<ContinueWatchingEntry> = emptyList()
+    private var localResumeItems: List<MediaItem> = emptyList()
+    private val detailLoadingIds = mutableSetOf<String>()
+    private var searchJob: Job? = null
+    private var searchGeneration: Long = 0L
+
+    private val _uiState = MutableStateFlow<EmbyUiState>(EmbyUiState.Loading)
+    val uiState: StateFlow<EmbyUiState> = _uiState.asStateFlow()
+
+    private val _playbackState = MutableStateFlow<PlaybackUiState>(PlaybackUiState.Idle)
+    val playbackState: StateFlow<PlaybackUiState> = _playbackState.asStateFlow()
+
+    private val _settings = MutableStateFlow(AppSettings())
+    val settings: StateFlow<AppSettings> = _settings.asStateFlow()
+
+    private val _tagBrowseState = MutableStateFlow(TagBrowseState())
+    val tagBrowseState: StateFlow<TagBrowseState> = _tagBrowseState.asStateFlow()
+
+    private val _actorBrowseState = MutableStateFlow(ActorBrowseState())
+    val actorBrowseState: StateFlow<ActorBrowseState> = _actorBrowseState.asStateFlow()
+
+    private val _mediaDetails = MutableStateFlow<Map<String, MediaItem>>(emptyMap())
+    val mediaDetails: StateFlow<Map<String, MediaItem>> = _mediaDetails.asStateFlow()
+
+    private val _seriesDetails = MutableStateFlow<Map<String, SeriesDetailState>>(emptyMap())
+    val seriesDetails: StateFlow<Map<String, SeriesDetailState>> = _seriesDetails.asStateFlow()
+
+    private val _searchState = MutableStateFlow(SearchState())
+    val searchState: StateFlow<SearchState> = _searchState.asStateFlow()
+
+    private val _serverProfilesState = MutableStateFlow(ServerProfilesState())
+    val serverProfilesState: StateFlow<ServerProfilesState> = _serverProfilesState.asStateFlow()
+
+    init {
+        observeSettings()
+        observeContinueWatching()
+        observeSearchHistory()
+        observeServerProfiles()
+        bootstrap()
+    }
+
+    fun refresh() {
+        bootstrap()
+    }
+
+    fun openPlayer(media: MediaItem) {
+        val activeSession = session ?: return
+        val repository = repository ?: return
+        _playbackState.value = PlaybackUiState.Loading(media)
+        viewModelScope.launch {
+            runCatching {
+                val playableMedia = repository.resolvePlayableItem(
+                    userId = activeSession.userId,
+                    token = activeSession.accessToken,
+                    media = media,
+                )
+                val initialPositionMs = playableMedia.resumePositionMs
+                    .takeIf { it > 0L }
+                    ?: resolveScopedResumePosition(playableMedia.id)
+                val source = repository.loadPlaybackSource(
+                    userId = activeSession.userId,
+                    token = activeSession.accessToken,
+                    itemId = playableMedia.id,
+                    fallbackTitle = playableMedia.title.ifBlank { media.title },
+                )
+                Triple(playableMedia, source, initialPositionMs)
+            }.onSuccess { (playableMedia, source, initialPositionMs) ->
+                _playbackState.value = PlaybackUiState.Ready(
+                    media = playableMedia,
+                    source = source,
+                    initialPositionMs = initialPositionMs,
+                )
+            }.onFailure { throwable ->
+                _playbackState.value = PlaybackUiState.Error(
+                    throwable.message ?: "无法创建播放地址",
+                )
+            }
+        }
+    }
+
+    fun closePlayer(
+        positionMs: Long = 0L,
+        durationMs: Long = 0L,
+    ) {
+        val activeMedia = when (val state = _playbackState.value) {
+            is PlaybackUiState.Loading -> state.media
+            is PlaybackUiState.Ready -> state.media
+            is PlaybackUiState.Error,
+            PlaybackUiState.Idle,
+            -> null
+        }
+
+        if (activeMedia != null) {
+            val profileId = activeServerProfileId
+            val userId = session?.userId
+            viewModelScope.launch {
+                if (!profileId.isNullOrBlank() && !userId.isNullOrBlank()) {
+                    continueWatchingStore.update(
+                        media = activeMedia,
+                        positionMs = positionMs,
+                        durationMs = durationMs,
+                        serverProfileId = profileId,
+                        serverUserId = userId,
+                    )
+                }
+            }
+        }
+
+        _playbackState.value = PlaybackUiState.Idle
+    }
+
+    fun updatePlayerMode(value: String) {
+        viewModelScope.launch {
+            settingsStore.updatePlayerMode(value)
+        }
+    }
+
+    fun updateSubtitleMode(value: String) {
+        viewModelScope.launch {
+            settingsStore.updateSubtitleMode(value)
+        }
+    }
+
+    fun updateLayoutMode(value: String) {
+        viewModelScope.launch {
+            settingsStore.updateLayoutMode(value)
+        }
+    }
+
+    fun updateShowLibraryCardTitle(value: Boolean) {
+        viewModelScope.launch {
+            settingsStore.updateShowLibraryCardTitle(value)
+        }
+    }
+
+    fun updateLibrarySortMode(value: String) {
+        val normalized = normalizeLibrarySortMode(value)
+        if (_settings.value.librarySortMode == normalized) {
+            return
+        }
+
+        _settings.update { current ->
+            current.copy(librarySortMode = normalized)
+        }
+
+        viewModelScope.launch {
+            settingsStore.updateLibrarySortMode(normalized)
+
+            val activeSession = session ?: return@launch
+            val repository = repository ?: return@launch
+            val currentState = _uiState.value as? EmbyUiState.Ready ?: return@launch
+            val selectedLibraryId = currentState.payload.selectedLibraryId ?: return@launch
+
+            reloadLibrary(
+                repository = repository,
+                activeSession = activeSession,
+                currentPayload = currentState.payload,
+                parentId = selectedLibraryId,
+                sortMode = normalized,
+                updateSelection = false,
+                append = false,
+            )
+        }
+    }
+
+    fun saveServerProfile(profile: ServerProfile) {
+        val normalized = profile.normalized()
+        viewModelScope.launch {
+            serverProfilesStore.upsert(
+                profile = normalized,
+                makeActive = true,
+            )
+            bootstrap()
+        }
+    }
+
+    fun deleteServerProfile(profileId: String) {
+        viewModelScope.launch {
+            serverProfilesStore.delete(profileId)
+            bootstrap()
+        }
+    }
+
+    fun activateServerProfile(profileId: String) {
+        if (_serverProfilesState.value.activeProfileId == profileId) {
+            return
+        }
+        viewModelScope.launch {
+            serverProfilesStore.setActive(profileId)
+            bootstrap()
+        }
+    }
+
+    fun openTag(tag: MediaTag) {
+        val activeSession = session ?: return
+        val repository = repository ?: return
+        if (_tagBrowseState.value.activeTag == tag && _tagBrowseState.value.items.isNotEmpty()) {
+            return
+        }
+
+        _tagBrowseState.value = TagBrowseState(
+            activeTag = tag,
+            items = _tagBrowseState.value.items.takeIf { _tagBrowseState.value.activeTag == tag }.orEmpty(),
+            isLoading = true,
+            errorMessage = null,
+        )
+
+        viewModelScope.launch {
+            runCatching {
+                repository.loadItemsForTag(
+                    userId = activeSession.userId,
+                    token = activeSession.accessToken,
+                    tag = tag,
+                )
+            }.onSuccess { items ->
+                _tagBrowseState.value = TagBrowseState(
+                    activeTag = tag,
+                    items = items,
+                    isLoading = false,
+                    errorMessage = null,
+                )
+            }.onFailure { throwable ->
+                _tagBrowseState.value = TagBrowseState(
+                    activeTag = tag,
+                    items = emptyList(),
+                    isLoading = false,
+                    errorMessage = throwable.message ?: "无法加载标签分类内容",
+                )
+            }
+        }
+    }
+
+    fun closeTagBrowse() {
+        _tagBrowseState.value = TagBrowseState()
+    }
+
+    fun openActor(actor: MediaPerson) {
+        val activeSession = session ?: return
+        val repository = repository ?: return
+        val actorId = actor.id.trim()
+        if (actorId.isBlank()) {
+            _actorBrowseState.value = ActorBrowseState(
+                activeActor = actor,
+                items = emptyList(),
+                isLoading = false,
+                errorMessage = "这个演员暂时没有可用的资料",
+            )
+            return
+        }
+        if (_actorBrowseState.value.activeActor?.id == actorId && _actorBrowseState.value.items.isNotEmpty()) {
+            return
+        }
+
+        _actorBrowseState.value = ActorBrowseState(
+            activeActor = actor,
+            items = _actorBrowseState.value.items.takeIf { _actorBrowseState.value.activeActor?.id == actorId }.orEmpty(),
+            isLoading = true,
+            errorMessage = null,
+        )
+
+        viewModelScope.launch {
+            runCatching {
+                repository.loadItemsForPerson(
+                    userId = activeSession.userId,
+                    token = activeSession.accessToken,
+                    personId = actorId,
+                )
+            }.onSuccess { items ->
+                _actorBrowseState.value = ActorBrowseState(
+                    activeActor = actor,
+                    items = items,
+                    isLoading = false,
+                    errorMessage = null,
+                )
+            }.onFailure { throwable ->
+                _actorBrowseState.value = ActorBrowseState(
+                    activeActor = actor,
+                    items = emptyList(),
+                    isLoading = false,
+                    errorMessage = throwable.message ?: "无法加载这个演员的作品",
+                )
+            }
+        }
+    }
+
+    fun closeActorBrowse() {
+        _actorBrowseState.value = ActorBrowseState()
+    }
+
+    fun updateSearchQuery(value: String) {
+        val query = value
+        searchGeneration += 1L
+        searchJob?.cancel()
+
+        if (query.isBlank()) {
+            _searchState.update { current ->
+                current.copy(
+                    query = "",
+                    results = emptyList(),
+                    isLoading = false,
+                    errorMessage = null,
+                )
+            }
+            return
+        }
+
+        val generation = searchGeneration
+        _searchState.update { current ->
+            current.copy(
+                query = query,
+                results = emptyList(),
+                isLoading = true,
+                errorMessage = null,
+            )
+        }
+
+        val activeSession = session ?: run {
+            _searchState.update { current ->
+                current.copy(
+                    isLoading = false,
+                    errorMessage = "当前还没有可用的 Emby 会话",
+                )
+            }
+            return
+        }
+        val repository = repository ?: run {
+            _searchState.update { current ->
+                current.copy(
+                    isLoading = false,
+                    errorMessage = "当前还没有可用的 Emby 会话",
+                )
+            }
+            return
+        }
+
+        searchJob = viewModelScope.launch {
+            delay(260L)
+
+            runCatching {
+                repository.searchMedia(
+                    userId = activeSession.userId,
+                    token = activeSession.accessToken,
+                    query = query,
+                )
+            }.onSuccess { items ->
+                if (generation != searchGeneration || _searchState.value.query != query) return@onSuccess
+                _searchState.update { current ->
+                    current.copy(
+                        results = items,
+                        isLoading = false,
+                        errorMessage = null,
+                    )
+                }
+            }.onFailure { throwable ->
+                if (generation != searchGeneration || _searchState.value.query != query) return@onFailure
+                _searchState.update { current ->
+                    current.copy(
+                        results = emptyList(),
+                        isLoading = false,
+                        errorMessage = throwable.message ?: "搜索失败",
+                    )
+                }
+            }
+        }
+    }
+
+    fun selectRecentSearch(query: String) {
+        updateSearchQuery(query.trim())
+    }
+
+    fun recordSearchQuery(query: String) {
+        val normalized = query.trim()
+        if (normalized.isBlank()) return
+        viewModelScope.launch {
+            searchHistoryStore.record(normalized)
+        }
+    }
+
+    fun clearRecentSearches() {
+        viewModelScope.launch {
+            searchHistoryStore.clear()
+        }
+    }
+
+    fun clearSearch() {
+        searchGeneration += 1L
+        searchJob?.cancel()
+        _searchState.update { current ->
+            current.copy(
+                query = "",
+                results = emptyList(),
+                isLoading = false,
+                errorMessage = null,
+            )
+        }
+    }
+
+    fun loadMediaDetail(media: MediaItem) {
+        val scopedResumePosition = resolveScopedResumePosition(media.id)
+        val cachedMedia = (_mediaDetails.value[media.id] ?: media).copy(
+            resumePositionMs = maxOf(
+                _mediaDetails.value[media.id]?.resumePositionMs ?: 0L,
+                media.resumePositionMs,
+                scopedResumePosition,
+            ),
+        )
+        if (cachedMedia.isSeries) {
+            loadSeriesDetail(cachedMedia.id)
+        }
+
+        if (cachedMedia.actors.isNotEmpty()) {
+            _mediaDetails.update { current -> current + (cachedMedia.id to cachedMedia) }
+            return
+        }
+
+        val activeSession = session ?: return
+        val repository = repository ?: return
+        if (!detailLoadingIds.add(media.id)) {
+            return
+        }
+
+        viewModelScope.launch {
+            runCatching {
+                repository.loadMediaDetail(
+                    userId = activeSession.userId,
+                    token = activeSession.accessToken,
+                    itemId = media.id,
+                )
+            }.onSuccess { detail ->
+                val mergedDetail = detail.copy(
+                    resumePositionMs = maxOf(
+                        detail.resumePositionMs,
+                        cachedMedia.resumePositionMs,
+                        scopedResumePosition,
+                    ),
+                )
+                _mediaDetails.update { current -> current + (mergedDetail.id to mergedDetail) }
+                if (mergedDetail.isSeries) {
+                    loadSeriesDetail(mergedDetail.id)
+                }
+            }.onFailure {
+                _mediaDetails.update { current ->
+                    if (current.containsKey(media.id)) current else current + (media.id to cachedMedia)
+                }
+            }
+            detailLoadingIds.remove(media.id)
+        }
+    }
+
+    fun selectSeriesSeason(
+        seriesId: String,
+        seasonId: String,
+    ) {
+        val activeSession = session ?: return
+        val repository = repository ?: return
+        val current = _seriesDetails.value[seriesId] ?: return
+        if (current.selectedSeasonId == seasonId && current.episodes.isNotEmpty()) {
+            return
+        }
+
+        _seriesDetails.update { state ->
+            state + (
+                seriesId to current.copy(
+                    selectedSeasonId = seasonId,
+                    episodes = emptyList(),
+                    isLoading = true,
+                    errorMessage = null,
+                )
+            )
+        }
+
+        viewModelScope.launch {
+            runCatching {
+                repository.loadSeasonEpisodes(
+                    userId = activeSession.userId,
+                    token = activeSession.accessToken,
+                    seasonId = seasonId,
+                )
+            }.onSuccess { episodes ->
+                _seriesDetails.update { state ->
+                    val latest = state[seriesId] ?: current
+                    state + (
+                        seriesId to latest.copy(
+                            selectedSeasonId = seasonId,
+                            episodes = episodes,
+                            isLoading = false,
+                            errorMessage = null,
+                        )
+                    )
+                }
+            }.onFailure { throwable ->
+                _seriesDetails.update { state ->
+                    val latest = state[seriesId] ?: current
+                    state + (
+                        seriesId to latest.copy(
+                            isLoading = false,
+                            errorMessage = throwable.message ?: "无法读取这个分季的剧集内容",
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    fun selectLibrary(viewId: String) {
+        val activeSession = session ?: return
+        val repository = repository ?: return
+        val currentState = _uiState.value as? EmbyUiState.Ready ?: return
+        if (currentState.payload.selectedLibraryId == viewId && currentState.payload.libraryItems.isNotEmpty()) {
+            return
+        }
+
+        viewModelScope.launch {
+            reloadLibrary(
+                repository = repository,
+                activeSession = activeSession,
+                currentPayload = currentState.payload,
+                parentId = viewId,
+                sortMode = _settings.value.librarySortMode,
+                updateSelection = true,
+                append = false,
+            )
+        }
+    }
+
+    fun loadMoreLibrary() {
+        val activeSession = session ?: return
+        val repository = repository ?: return
+        val currentState = _uiState.value as? EmbyUiState.Ready ?: return
+        val selectedLibraryId = currentState.payload.selectedLibraryId ?: return
+        if (currentState.isRefreshingLibrary || currentState.isAppendingLibrary) {
+            return
+        }
+        if (currentState.payload.libraryItems.size >= currentState.payload.libraryTotalCount) {
+            return
+        }
+
+        viewModelScope.launch {
+            reloadLibrary(
+                repository = repository,
+                activeSession = activeSession,
+                currentPayload = currentState.payload,
+                parentId = selectedLibraryId,
+                sortMode = _settings.value.librarySortMode,
+                updateSelection = false,
+                append = true,
+            )
+        }
+    }
+
+    private fun loadSeriesDetail(seriesId: String) {
+        val activeSession = session ?: return
+        val repository = repository ?: return
+        val current = _seriesDetails.value[seriesId]
+        val alreadyReady = current != null &&
+            current.episodes.isNotEmpty() &&
+            (current.seasons.isEmpty() || current.selectedSeasonId != null)
+        if (current?.isLoading == true || alreadyReady) {
+            return
+        }
+
+        _seriesDetails.update { state ->
+            state + (
+                seriesId to (current ?: SeriesDetailState()).copy(
+                    isLoading = true,
+                    errorMessage = null,
+                )
+            )
+        }
+
+        viewModelScope.launch {
+            runCatching {
+                repository.loadSeriesContent(
+                    userId = activeSession.userId,
+                    token = activeSession.accessToken,
+                    seriesId = seriesId,
+                )
+            }.onSuccess { content ->
+                _seriesDetails.update { state ->
+                    state + (
+                        seriesId to SeriesDetailState(
+                            seasons = content.seasons,
+                            selectedSeasonId = content.selectedSeasonId,
+                            episodes = content.episodes,
+                            nextUpEpisode = content.nextUpEpisode,
+                            isLoading = false,
+                            errorMessage = null,
+                        )
+                    )
+                }
+            }.onFailure { throwable ->
+                _seriesDetails.update { state ->
+                    val latest = state[seriesId] ?: SeriesDetailState()
+                    state + (
+                        seriesId to latest.copy(
+                            isLoading = false,
+                            errorMessage = throwable.message ?: "无法整理这个剧集的分季信息",
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    private fun bootstrap() {
+        viewModelScope.launch {
+            serverProfilesStore.ensureSeeded(
+                defaultUrl = BuildConfig.EMBY_SERVER_URL,
+                defaultUsername = BuildConfig.EMBY_USERNAME,
+                defaultPassword = BuildConfig.EMBY_PASSWORD,
+            )
+            val serverProfiles = serverProfilesStore.currentState()
+            _serverProfilesState.value = serverProfiles
+            val activeSettings = settingsStore.currentSettings()
+            _settings.value = activeSettings
+            val activeProfile = serverProfiles.activeProfile
+
+            if (activeProfile == null) {
+                activeServerProfileId = null
+                session = null
+                repository = null
+                serverPayload = null
+                syncScopedResumeItems()
+                _uiState.value = EmbyUiState.Error(
+                    title = "还没有配置服务器",
+                    detail = "请在设置里的服务器卡片中新增可用的 Emby 节点。",
+                )
+                return@launch
+            }
+
+            if (
+                activeProfile.serverUrl.isBlank() ||
+                activeProfile.username.isBlank() ||
+                activeProfile.password.isBlank()
+            ) {
+                activeServerProfileId = activeProfile.id
+                session = null
+                repository = null
+                serverPayload = null
+                syncScopedResumeItems()
+                _uiState.value = EmbyUiState.Error(
+                    title = "服务器配置不完整",
+                    detail = "请补全服务器地址、用户名和密码后再连接。",
+                )
+                return@launch
+            }
+
+            val activeRepository = EmbyRepository(activeProfile.serverUrl)
+            activeServerProfileId = activeProfile.id
+            repository = activeRepository
+            session = null
+            syncScopedResumeItems()
+
+            _uiState.value = EmbyUiState.Loading
+            _tagBrowseState.value = TagBrowseState()
+            _actorBrowseState.value = ActorBrowseState()
+            _mediaDetails.value = emptyMap()
+            _seriesDetails.value = emptyMap()
+            detailLoadingIds.clear()
+            _searchState.update { current ->
+                current.copy(
+                    query = "",
+                    results = emptyList(),
+                    isLoading = false,
+                    errorMessage = null,
+                )
+            }
+            searchGeneration += 1L
+            searchJob?.cancel()
+
+            runCatching {
+                activeRepository.bootstrap(
+                    username = activeProfile.username,
+                    password = activeProfile.password,
+                    librarySortMode = activeSettings.librarySortMode,
+                )
+            }.onSuccess { result ->
+                applyBootstrap(result)
+            }.onFailure { throwable ->
+                session = null
+                serverPayload = null
+                syncScopedResumeItems()
+                _uiState.value = EmbyUiState.Error(
+                    title = "连接 Emby 失败",
+                    detail = throwable.message ?: "未知错误",
+                )
+            }
+        }
+    }
+
+    private fun applyBootstrap(result: EmbyBootstrapResult) {
+        session = result.session
+        serverPayload = result.payload
+        syncScopedResumeItems()
+        _uiState.value = EmbyUiState.Ready(
+            payload = result.payload.withMergedResume(localResumeItems),
+        )
+    }
+
+    private fun observeSettings() {
+        viewModelScope.launch {
+            settingsStore.settings.collectLatest { settings ->
+                _settings.value = settings
+            }
+        }
+    }
+
+    private fun observeContinueWatching() {
+        viewModelScope.launch {
+            continueWatchingStore.entries.collectLatest { entries ->
+                cachedResumeEntries = entries
+                syncScopedResumeItems()
+                serverPayload?.let { payload ->
+                    _uiState.update { current ->
+                        (current as? EmbyUiState.Ready)?.copy(
+                            payload = payload.withMergedResume(localResumeItems),
+                        ) ?: current
+                    }
+                }
+            }
+        }
+    }
+
+    private fun syncScopedResumeItems() {
+        val profileId = activeServerProfileId
+        val userId = session?.userId
+        localResumeItems = cachedResumeEntries
+            .asSequence()
+            .filter { entry ->
+                profileId != null &&
+                    entry.serverProfileId == profileId &&
+                    (userId.isNullOrBlank() || entry.serverUserId == userId)
+            }
+            .map { it.toMediaItem() }
+            .toList()
+    }
+
+    private fun resolveScopedResumePosition(mediaId: String): Long {
+        val profileId = activeServerProfileId ?: return 0L
+        val userId = session?.userId
+        return cachedResumeEntries
+            .firstOrNull { entry ->
+                entry.id == mediaId &&
+                    entry.serverProfileId == profileId &&
+                    (userId.isNullOrBlank() || entry.serverUserId == userId)
+            }
+            ?.positionMs
+            ?.coerceAtLeast(0L)
+            ?: 0L
+    }
+
+    private fun observeServerProfiles() {
+        viewModelScope.launch {
+            serverProfilesStore.state.collectLatest { profiles ->
+                _serverProfilesState.value = profiles
+            }
+        }
+    }
+
+    private fun observeSearchHistory() {
+        viewModelScope.launch {
+            searchHistoryStore.queries.collectLatest { queries ->
+                _searchState.update { current ->
+                    current.copy(recentQueries = queries)
+                }
+            }
+        }
+    }
+
+    private suspend fun reloadLibrary(
+        repository: EmbyRepository,
+        activeSession: EmbySession,
+        currentPayload: EmbyHomePayload,
+        parentId: String,
+        sortMode: String,
+        updateSelection: Boolean,
+        append: Boolean,
+    ) {
+        _uiState.update { current ->
+            (current as? EmbyUiState.Ready)?.copy(
+                payload = current.payload.copy(
+                    selectedLibraryId = if (updateSelection) parentId else current.payload.selectedLibraryId,
+                ),
+                isRefreshingLibrary = !append,
+                isAppendingLibrary = append,
+            ) ?: current
+        }
+
+        val collectionType = currentPayload.libraries
+            .firstOrNull { it.id == parentId }
+            ?.collectionType
+            .orEmpty()
+
+        runCatching {
+            repository.loadLibraryItems(
+                userId = activeSession.userId,
+                token = activeSession.accessToken,
+                parentId = parentId,
+                collectionType = collectionType,
+                sortMode = sortMode,
+                startIndex = if (append) currentPayload.libraryItems.size else 0,
+            )
+        }.onSuccess { page ->
+            val basePayload = serverPayload ?: currentPayload
+            val mergedItems = if (append) {
+                (basePayload.libraryItems + page.items).distinctBy { it.id }
+            } else {
+                page.items
+            }
+            val updatedPayload = basePayload.copy(
+                selectedLibraryId = if (updateSelection) parentId else basePayload.selectedLibraryId,
+                libraryItems = mergedItems,
+                libraryTotalCount = page.totalCount,
+            )
+            serverPayload = updatedPayload
+            _uiState.update { current ->
+                (current as? EmbyUiState.Ready)?.copy(
+                    payload = updatedPayload.withMergedResume(localResumeItems),
+                    isRefreshingLibrary = false,
+                    isAppendingLibrary = false,
+                ) ?: current
+            }
+        }.onFailure { throwable ->
+            if (append) {
+                _uiState.update { current ->
+                    (current as? EmbyUiState.Ready)?.copy(isAppendingLibrary = false) ?: current
+                }
+                return
+            }
+            _uiState.update { current ->
+                (current as? EmbyUiState.Ready)?.copy(
+                    isRefreshingLibrary = false,
+                    isAppendingLibrary = false,
+                ) ?: current
+            }
+            _uiState.value = EmbyUiState.Error(
+                title = "媒体库加载失败",
+                detail = throwable.message ?: "无法读取媒体库内容",
+                fallback = currentPayload.withMergedResume(localResumeItems),
+            )
+        }
+    }
+}
+
+private fun EmbyHomePayload.withMergedResume(
+    localItems: List<MediaItem>,
+): EmbyHomePayload = copy(
+    resumeItems = mergeResumeItems(
+        serverItems = resumeItems,
+        localItems = localItems,
+    ),
+)
+
+private fun mergeResumeItems(
+    serverItems: List<MediaItem>,
+    localItems: List<MediaItem>,
+): List<MediaItem> {
+    val items = LinkedHashMap<String, MediaItem>()
+    localItems.forEach { item ->
+        items[item.id] = item
+    }
+    serverItems.forEach { item ->
+        items.putIfAbsent(item.id, item)
+    }
+    return items.values.toList()
+}

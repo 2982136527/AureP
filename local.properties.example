@@ -1,0 +1,4 @@
+sdk.dir=/path/to/android-sdk
+emby.serverUrl=
+emby.username=
+emby.password=

@@ -1,0 +1,13 @@
+.DS_Store
+.gradle/
+.kotlin/
+.playwright-mcp/
+.server_profiles.preferences_pb
+.tmp/
+.tmp*
+android-sdk/
+app/build/
+build/
+commandlinetools-mac-14742923_latest.zip
+local.properties
+output/
