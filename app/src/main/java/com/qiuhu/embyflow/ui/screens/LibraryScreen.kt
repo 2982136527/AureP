@@ -177,8 +177,11 @@ fun LibraryScreen(
                     .roundToInt()
                     .coerceAtLeast(1)
                 val itemHeightPx = (itemWidthPx / posterAspectRatio).roundToInt().coerceAtLeast(1)
-                val prefetchStart = (lastVisibleIndex + 1).coerceAtLeast(0)
+                val prefetchStart = (lastVisibleIndex + 1)
+                    .coerceAtLeast(0)
+                    .coerceAtMost(libraryItems.size)
                 val prefetchEnd = (prefetchStart + 12).coerceAtMost(libraryItems.size)
+                if (prefetchStart >= prefetchEnd) return@collect
                 val upcomingUrls = libraryItems
                     .subList(prefetchStart, prefetchEnd)
                     .mapNotNull { it.primaryImageUrl ?: it.backdropImageUrl }
