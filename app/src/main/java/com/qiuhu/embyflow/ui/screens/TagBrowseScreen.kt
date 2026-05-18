@@ -54,9 +54,9 @@ fun TagBrowseScreen(
         loadingMessage = "正在加载这个标签下的内容",
         onBack = onBack,
         onOpenMedia = onOpenMedia,
-        columns = 2,
+        columns = 3,
         cardCompact = true,
-        titleBelow = false,
+        titleBelow = true,
     )
 }
 

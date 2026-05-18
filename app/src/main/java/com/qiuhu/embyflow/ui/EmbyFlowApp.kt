@@ -27,6 +27,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
@@ -43,6 +44,8 @@ import com.qiuhu.embyflow.model.EmbyHomePayload
 import com.qiuhu.embyflow.model.MediaItem
 import com.qiuhu.embyflow.model.displayName
 import com.qiuhu.embyflow.model.isSeries
+import com.qiuhu.embyflow.model.MediaPerson
+import com.qiuhu.embyflow.model.MediaTag
 import com.qiuhu.embyflow.ui.components.EditorialBackground
 import com.qiuhu.embyflow.ui.components.EditorialCard
 import com.qiuhu.embyflow.ui.components.EditorialTextPrimary
@@ -72,6 +75,21 @@ private data class LibraryScrollSnapshot(
     val offset: Int = 0,
 )
 
+private sealed interface OverlayDestination {
+    data class Detail(
+        val mediaId: String,
+        val snapshot: MediaItem? = null,
+    ) : OverlayDestination
+
+    data class Tag(
+        val tag: MediaTag,
+    ) : OverlayDestination
+
+    data class Actor(
+        val actor: MediaPerson,
+    ) : OverlayDestination
+}
+
 private const val ErrorToastDurationMillis = 1800L
 
 @Composable
@@ -80,8 +98,7 @@ fun EmbyFlowApp(
 ) {
     EmbyFlowTheme {
         var currentTab by rememberSaveable { mutableStateOf(RootTab.Home.name) }
-        var selectedMediaId by rememberSaveable { mutableStateOf<String?>(null) }
-        var selectedMediaSnapshot by remember { mutableStateOf<MediaItem?>(null) }
+        val overlayStack = remember { mutableStateListOf<OverlayDestination>() }
         var searchVisible by rememberSaveable { mutableStateOf(false) }
         val uiState by embyViewModel.uiState.collectAsStateWithLifecycle()
         val playbackState by embyViewModel.playbackState.collectAsStateWithLifecycle()
@@ -99,32 +116,67 @@ fun EmbyFlowApp(
         val isServerConnected = uiState is EmbyUiState.Ready
         val hasConfiguredServer = serverProfilesState.activeProfile != null
         fun openMediaDetail(media: MediaItem) {
-            selectedMediaId = media.id
-            selectedMediaSnapshot = media
+            overlayStack += OverlayDestination.Detail(
+                mediaId = media.id,
+                snapshot = media,
+            )
             embyViewModel.loadMediaDetail(media)
         }
 
-        fun closeMediaDetail() {
-            selectedMediaId = null
-            selectedMediaSnapshot = null
+        fun openTagBrowse(tag: MediaTag) {
+            overlayStack += OverlayDestination.Tag(tag)
+            embyViewModel.openTag(tag)
         }
 
+        fun openActorBrowse(actor: MediaPerson) {
+            overlayStack += OverlayDestination.Actor(actor)
+            embyViewModel.openActor(actor)
+        }
+
+        fun popOverlay() {
+            val removed = overlayStack.removeLastOrNull() ?: return
+            when (removed) {
+                is OverlayDestination.Tag -> embyViewModel.closeTagBrowse()
+                is OverlayDestination.Actor -> embyViewModel.closeActorBrowse()
+                is OverlayDestination.Detail -> Unit
+            }
+
+            when (val next = overlayStack.lastOrNull()) {
+                is OverlayDestination.Tag -> {
+                    if (tagBrowseState.activeTag != next.tag) {
+                        embyViewModel.openTag(next.tag)
+                    }
+                }
+
+                is OverlayDestination.Actor -> {
+                    if (actorBrowseState.activeActor?.id != next.actor.id) {
+                        embyViewModel.openActor(next.actor)
+                    }
+                }
+
+                is OverlayDestination.Detail,
+                null,
+                -> Unit
+            }
+        }
+
+        val activeOverlay = overlayStack.lastOrNull()
         val selectedMedia = remember(
-            selectedMediaId,
-            selectedMediaSnapshot,
+            activeOverlay,
             payload,
             tagBrowseState.items,
             actorBrowseState.items,
             mediaDetails,
         ) {
-            selectedMediaId?.let { id ->
+            val detail = activeOverlay as? OverlayDestination.Detail ?: return@remember null
+            detail.mediaId.let { id ->
                 mediaDetails[id]
                     ?: findMediaById(
                         id = id,
                         payload = payload,
                         extraItems = tagBrowseState.items + actorBrowseState.items,
                     )
-                    ?: selectedMediaSnapshot?.takeIf { it.id == id }
+                    ?: detail.snapshot?.takeIf { it.id == id }
             }
         }
 
@@ -133,9 +185,7 @@ fun EmbyFlowApp(
         BackHandler(
             enabled = playbackState !is PlaybackUiState.Idle ||
                 searchVisible ||
-                selectedMedia != null ||
-                tagBrowseState.activeTag != null ||
-                actorBrowseState.activeActor != null ||
+                overlayStack.isNotEmpty() ||
                 currentRootTab != RootTab.Home,
         ) {
             when {
@@ -144,9 +194,7 @@ fun EmbyFlowApp(
                     searchVisible = false
                     embyViewModel.clearSearch()
                 }
-                selectedMedia != null -> closeMediaDetail()
-                actorBrowseState.activeActor != null -> embyViewModel.closeActorBrowse()
-                tagBrowseState.activeTag != null -> embyViewModel.closeTagBrowse()
+                overlayStack.isNotEmpty() -> popOverlay()
                 currentRootTab != RootTab.Home -> currentTab = RootTab.Home.name
             }
         }
@@ -191,7 +239,8 @@ fun EmbyFlowApp(
                     onSelectLibrary = embyViewModel::selectLibrary,
                     onLoadMoreLibrary = embyViewModel::loadMoreLibrary,
                     onUpdatePlayerMode = embyViewModel::updatePlayerMode,
-                    onUpdateSubtitleMode = embyViewModel::updateSubtitleMode,
+                    onUpdateEmbeddedSubtitleLanguage = embyViewModel::updateEmbeddedSubtitleLanguage,
+                    onUpdateExternalSubtitleLanguage = embyViewModel::updateExternalSubtitleLanguage,
                     onUpdateLayoutMode = embyViewModel::updateLayoutMode,
                     onUpdateShowLibraryCardTitle = embyViewModel::updateShowLibraryCardTitle,
                     onUpdateExperimentalDualBackendRace = embyViewModel::updateExperimentalDualBackendRace,
@@ -209,56 +258,55 @@ fun EmbyFlowApp(
                         embyViewModel.selectLibrary(it.id)
                     },
                 )
-                PlaybackUiState.Idle -> AnimatedContent(targetState = selectedMedia, label = "root-screen") { media ->
-                    val activeTag = tagBrowseState.activeTag
-                    val activeActor = actorBrowseState.activeActor
-                    if (activeTag != null) {
-                        TagBrowseScreen(
-                            tag = activeTag,
+                PlaybackUiState.Idle -> AnimatedContent(targetState = activeOverlay, label = "root-screen") { destination ->
+                    when (destination) {
+                        is OverlayDestination.Detail -> {
+                            val media = selectedMedia
+                            if (media == null) {
+                                LoadingScreen()
+                            } else {
+                                DetailScreen(
+                                    media = media,
+                                    seriesDetail = media.takeIf { it.isSeries }?.let { seriesDetails[it.id] },
+                                    relatedItems = payload.latestItems.filterNot { it.id == media.id }.take(6),
+                                    onPlay = embyViewModel::openPlayer,
+                                    onBack = ::popOverlay,
+                                    onOpenRelated = ::openMediaDetail,
+                                    onOpenTag = ::openTagBrowse,
+                                    onOpenActor = ::openActorBrowse,
+                                    onSelectSeason = { seasonId ->
+                                        embyViewModel.selectSeriesSeason(media.id, seasonId)
+                                    },
+                                    onPlayEpisode = embyViewModel::openPlayer,
+                                )
+                            }
+                        }
+
+                        is OverlayDestination.Tag -> TagBrowseScreen(
+                            tag = destination.tag,
                             items = tagBrowseState.items,
                             isLoading = tagBrowseState.isLoading,
                             errorMessage = tagBrowseState.errorMessage,
-                            onBack = embyViewModel::closeTagBrowse,
-                            onOpenMedia = {
-                                openMediaDetail(it)
-                                embyViewModel.closeTagBrowse()
-                            },
+                            onBack = ::popOverlay,
+                            onOpenMedia = ::openMediaDetail,
                         )
-                    } else if (activeActor != null) {
-                        MediaBrowseScreen(
-                            title = activeActor.name,
-                            subtitle = activeActor.role.ifBlank { "演员作品" },
+
+                        is OverlayDestination.Actor -> MediaBrowseScreen(
+                            title = destination.actor.name,
+                            subtitle = destination.actor.role.ifBlank { "演员作品" },
                             items = actorBrowseState.items,
                             isLoading = actorBrowseState.isLoading,
                             errorMessage = actorBrowseState.errorMessage,
                             emptyMessage = "这个演员还没有可显示的作品",
                             loadingMessage = "正在加载这个演员的作品",
-                            onBack = embyViewModel::closeActorBrowse,
-                            onOpenMedia = {
-                                openMediaDetail(it)
-                                embyViewModel.closeActorBrowse()
-                            },
+                            onBack = ::popOverlay,
+                            onOpenMedia = ::openMediaDetail,
                             columns = 3,
                             cardCompact = true,
                             titleBelow = true,
                         )
-                    } else if (media != null) {
-                        DetailScreen(
-                            media = media,
-                            seriesDetail = media.takeIf { it.isSeries }?.let { seriesDetails[it.id] },
-                            relatedItems = payload.latestItems.filterNot { it.id == media.id }.take(6),
-                            onPlay = embyViewModel::openPlayer,
-                            onBack = ::closeMediaDetail,
-                            onOpenRelated = ::openMediaDetail,
-                            onOpenTag = embyViewModel::openTag,
-                            onOpenActor = embyViewModel::openActor,
-                            onSelectSeason = { seasonId ->
-                                embyViewModel.selectSeriesSeason(media.id, seasonId)
-                            },
-                            onPlayEpisode = embyViewModel::openPlayer,
-                        )
-                    } else {
-                        when (val state = uiState) {
+
+                        null -> when (val state = uiState) {
                             EmbyUiState.Loading -> LoadingScreen()
                             is EmbyUiState.Error -> RootScaffold(
                                 payload = state.fallback,
@@ -276,7 +324,8 @@ fun EmbyFlowApp(
                                 onSelectLibrary = embyViewModel::selectLibrary,
                                 onLoadMoreLibrary = embyViewModel::loadMoreLibrary,
                                 onUpdatePlayerMode = embyViewModel::updatePlayerMode,
-                                onUpdateSubtitleMode = embyViewModel::updateSubtitleMode,
+                                onUpdateEmbeddedSubtitleLanguage = embyViewModel::updateEmbeddedSubtitleLanguage,
+                                onUpdateExternalSubtitleLanguage = embyViewModel::updateExternalSubtitleLanguage,
                                 onUpdateLayoutMode = embyViewModel::updateLayoutMode,
                                 onUpdateShowLibraryCardTitle = embyViewModel::updateShowLibraryCardTitle,
                                 onUpdateExperimentalDualBackendRace = embyViewModel::updateExperimentalDualBackendRace,
@@ -311,7 +360,8 @@ fun EmbyFlowApp(
                                 onSelectLibrary = embyViewModel::selectLibrary,
                                 onLoadMoreLibrary = embyViewModel::loadMoreLibrary,
                                 onUpdatePlayerMode = embyViewModel::updatePlayerMode,
-                                onUpdateSubtitleMode = embyViewModel::updateSubtitleMode,
+                                onUpdateEmbeddedSubtitleLanguage = embyViewModel::updateEmbeddedSubtitleLanguage,
+                                onUpdateExternalSubtitleLanguage = embyViewModel::updateExternalSubtitleLanguage,
                                 onUpdateLayoutMode = embyViewModel::updateLayoutMode,
                                 onUpdateShowLibraryCardTitle = embyViewModel::updateShowLibraryCardTitle,
                                 onUpdateExperimentalDualBackendRace = embyViewModel::updateExperimentalDualBackendRace,
@@ -378,7 +428,8 @@ private fun RootScaffold(
     onSelectLibrary: (String) -> Unit,
     onLoadMoreLibrary: () -> Unit = {},
     onUpdatePlayerMode: (String) -> Unit,
-    onUpdateSubtitleMode: (String) -> Unit,
+    onUpdateEmbeddedSubtitleLanguage: (String) -> Unit,
+    onUpdateExternalSubtitleLanguage: (String) -> Unit,
     onUpdateLayoutMode: (String) -> Unit,
     onUpdateShowLibraryCardTitle: (Boolean) -> Unit,
     onUpdateExperimentalDualBackendRace: (Boolean) -> Unit,
@@ -474,7 +525,8 @@ private fun RootScaffold(
                 appUpdateState = appUpdateState,
                 serverProfilesState = serverProfilesState,
                 onUpdatePlayerMode = onUpdatePlayerMode,
-                onUpdateSubtitleMode = onUpdateSubtitleMode,
+                onUpdateEmbeddedSubtitleLanguage = onUpdateEmbeddedSubtitleLanguage,
+                onUpdateExternalSubtitleLanguage = onUpdateExternalSubtitleLanguage,
                 onUpdateLayoutMode = onUpdateLayoutMode,
                 onUpdateShowLibraryCardTitle = onUpdateShowLibraryCardTitle,
                 onUpdateExperimentalDualBackendRace = onUpdateExperimentalDualBackendRace,

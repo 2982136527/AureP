@@ -12,6 +12,7 @@ import com.qiuhu.embyflow.model.MediaTagType
 import com.qiuhu.embyflow.model.ServerSnapshot
 import com.qiuhu.embyflow.model.hasBackdropImage
 import com.qiuhu.embyflow.model.hasPosterImage
+import com.qiuhu.embyflow.model.isEpisode
 import com.qiuhu.embyflow.model.formatRating
 import com.qiuhu.embyflow.model.placeholderColors
 import kotlinx.coroutines.Dispatchers
@@ -470,10 +471,16 @@ class EmbyRepository(
             "${key.urlEncode()}=${value.urlEncode()}"
         }
 
-        get<QueryResultDto>(
+        val rawItems = get<QueryResultDto>(
             path = "/Users/$userId/Items?$query",
             token = token,
         ).Items.map { it.toMediaItem(token = token) }
+
+        collapsePersonBrowseItems(
+            userId = userId,
+            token = token,
+            items = rawItems,
+        )
     }
 
     suspend fun searchMedia(
@@ -519,6 +526,43 @@ class EmbyRepository(
             path = "/Users/$userId/Items/${itemId.urlEncode()}?$query",
             token = token,
         ).toMediaItem(token = token)
+    }
+
+    private suspend fun collapsePersonBrowseItems(
+        userId: String,
+        token: String,
+        items: List<MediaItem>,
+    ): List<MediaItem> {
+        val collapsed = mutableListOf<MediaItem>()
+        val emittedIds = mutableSetOf<String>()
+        val seriesCache = mutableMapOf<String, MediaItem?>()
+
+        items.forEach { item ->
+            if (item.isEpisode) {
+                val seriesId = item.seriesId?.takeIf { it.isNotBlank() } ?: return@forEach
+                if (emittedIds.contains(seriesId)) {
+                    return@forEach
+                }
+                val seriesItem = seriesCache.getOrPut(seriesId) {
+                    runCatching {
+                        loadMediaDetail(
+                            userId = userId,
+                            token = token,
+                            itemId = seriesId,
+                        )
+                    }.getOrNull()
+                } ?: return@forEach
+                collapsed += seriesItem
+                emittedIds += seriesItem.id
+                return@forEach
+            }
+
+            if (emittedIds.add(item.id)) {
+                collapsed += item
+            }
+        }
+
+        return collapsed
     }
 
     suspend fun loadSeriesContent(

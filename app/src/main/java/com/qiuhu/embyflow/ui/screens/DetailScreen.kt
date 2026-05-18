@@ -96,14 +96,47 @@ fun DetailScreen(
     BackHandler(enabled = summaryDialogVisible) {
         summaryDialogVisible = false
     }
-    val playTarget = if (media.isSeries) seriesDetail?.nextUpEpisode ?: media else media
+    val seriesEpisodes = seriesDetail?.episodes.orEmpty()
+    val resumeEpisodeTarget = remember(media, seriesEpisodes) {
+        if (!media.isSeries || media.resumePositionMs <= 0L || seriesEpisodes.isEmpty()) {
+            null
+        } else {
+            seriesEpisodes.firstOrNull { episode ->
+                val sameSeason = when {
+                    !media.seasonId.isNullOrBlank() -> media.seasonId == episode.seasonId
+                    media.seasonNumber != null -> media.seasonNumber == episode.seasonNumber
+                    else -> true
+                }
+                val sameEpisode = when {
+                    media.episodeNumber != null -> media.episodeNumber == episode.episodeNumber
+                    else -> true
+                }
+                sameSeason && sameEpisode
+            }?.let { matchedEpisode ->
+                matchedEpisode.copy(
+                    resumePositionMs = maxOf(
+                        media.resumePositionMs,
+                        matchedEpisode.resumePositionMs,
+                    ),
+                )
+            }
+        }
+    }
+    val playTarget = when {
+        media.isSeries && resumeEpisodeTarget != null -> resumeEpisodeTarget
+        media.isSeries -> seriesDetail?.nextUpEpisode ?: media
+        else -> media
+    }
     val playButtonLabel = when {
-        media.isSeries && seriesDetail?.nextUpEpisode != null -> "继续播放 ${seriesDetail.nextUpEpisode.seasonEpisodeLabel().ifBlank { "下一集" }}"
+        media.isSeries && resumeEpisodeTarget != null ->
+            "继续播放 ${resumeEpisodeTarget.seasonEpisodeLabel().ifBlank { "当前这一集" }}"
+        media.isSeries && seriesDetail?.nextUpEpisode != null ->
+            "继续播放 ${seriesDetail.nextUpEpisode.seasonEpisodeLabel().ifBlank { "下一集" }}"
         media.resumePositionMs > 0L -> "继续播放"
         media.isSeries -> "从第一集开始"
         else -> "开始播放"
     }
-    val seriesEpisodes = seriesDetail?.episodes.orEmpty()
+    val highlightedEpisodeId = resumeEpisodeTarget?.id ?: seriesDetail?.nextUpEpisode?.id
     val listState = rememberLazyListState()
     val density = LocalDensity.current
     val defaultHeroTransitionDistancePx = with(density) { 280.dp.toPx() }
@@ -212,7 +245,8 @@ fun DetailScreen(
                         if (seriesEpisodes.isNotEmpty()) {
                             DetailEpisodeRow(
                                 episodes = seriesEpisodes,
-                                nextUpEpisodeId = seriesDetail?.nextUpEpisode?.id,
+                                nextUpEpisodeId = highlightedEpisodeId,
+                                seriesBackdropImageUrl = media.backdropImageUrl,
                                 onPlayEpisode = onPlayEpisode,
                             )
                         }
@@ -234,10 +268,13 @@ fun DetailScreen(
             }
 
             item {
-                DetailSummaryCard(
-                    summary = media.summary,
-                    onClick = { summaryDialogVisible = true },
-                )
+                val summary = media.summary.takeIf { it.isNotBlank() && it != "暂无简介" }
+                if (summary != null) {
+                    DetailSummaryCard(
+                        summary = summary,
+                        onClick = { summaryDialogVisible = true },
+                    )
+                }
             }
 
             if (media.actors.isNotEmpty()) {
@@ -310,10 +347,11 @@ fun DetailScreen(
             }
         }
 
-        if (summaryDialogVisible) {
+        val summary = media.summary.takeIf { it.isNotBlank() && it != "暂无简介" }
+        if (summaryDialogVisible && summary != null) {
             DetailSummaryDialog(
                 title = media.title,
-                summary = media.summary,
+                summary = summary,
                 onDismiss = { summaryDialogVisible = false },
             )
         }
@@ -727,6 +765,7 @@ private fun DetailSeriesHeaderSection(
 private fun DetailEpisodeRow(
     episodes: List<MediaItem>,
     nextUpEpisodeId: String?,
+    seriesBackdropImageUrl: String?,
     onPlayEpisode: (MediaItem) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -740,6 +779,7 @@ private fun DetailEpisodeRow(
                 DetailEpisodeCard(
                     episode = episode,
                     isNextUp = nextUpEpisodeId == episode.id,
+                    seriesBackdropImageUrl = seriesBackdropImageUrl,
                     onPlay = { onPlayEpisode(episode) },
                     modifier = Modifier.width(208.dp),
                 )
@@ -775,6 +815,7 @@ private fun DetailSeasonChip(
 private fun DetailEpisodeCard(
     episode: MediaItem,
     isNextUp: Boolean,
+    seriesBackdropImageUrl: String?,
     onPlay: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -797,7 +838,7 @@ private fun DetailEpisodeCard(
                 contentAlignment = Alignment.BottomStart,
             ) {
                 PixelCatAsyncImage(
-                    model = episode.primaryImageUrl ?: episode.backdropImageUrl,
+                    model = episode.primaryImageUrl ?: episode.backdropImageUrl ?: seriesBackdropImageUrl,
                     contentDescription = episode.title,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop,
@@ -856,24 +897,21 @@ private fun DetailSummaryCard(
     EditorialCard(
         modifier = Modifier
             .fillMaxWidth()
-            .height(144.dp)
             .clickable(onClick = onClick),
         color = EditorialSurface,
         contentPadding = PaddingValues(horizontal = 18.dp, vertical = 18.dp),
     ) {
         Column(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Column {
-                Text(
-                    text = summary,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = EditorialTextSecondary,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
+            Text(
+                text = summary,
+                style = MaterialTheme.typography.bodyMedium,
+                color = EditorialTextSecondary,
+                maxLines = 6,
+                overflow = TextOverflow.Ellipsis,
+            )
             Text(
                 text = "点击查看完整简介",
                 style = MaterialTheme.typography.labelMedium,

@@ -187,16 +187,15 @@ class EmbyViewModel(
         val activeSession = session ?: return
         val repository = repository ?: return
         val requestGeneration = ++playbackRequestGeneration
-        val cachedDirectSource = media
+        val resolvedMedia = resolveMediaWithResume(media)
+        val cachedDirectSource = resolvedMedia
             .takeIf(::canWarmPlaybackSource)
             ?.let { playbackSourceCache[it.id] }
         if (cachedDirectSource != null) {
             _playbackState.value = PlaybackUiState.Ready(
-                media = media,
+                media = resolvedMedia,
                 source = cachedDirectSource,
-                initialPositionMs = media.resumePositionMs
-                    .takeIf { it > 0L }
-                    ?: resolveScopedResumePosition(media.id),
+                initialPositionMs = resolvedMedia.resumePositionMs.coerceAtLeast(0L),
             )
             return
         }
@@ -212,19 +211,18 @@ class EmbyViewModel(
                 val playableMedia = repository.resolvePlayableItem(
                     userId = activeSession.userId,
                     token = activeSession.accessToken,
-                    media = media,
+                    media = resolvedMedia,
                 )
-                val initialPositionMs = playableMedia.resumePositionMs
-                    .takeIf { it > 0L }
-                    ?: resolveScopedResumePosition(playableMedia.id)
+                val resolvedPlayableMedia = resolveMediaWithResume(playableMedia)
+                val initialPositionMs = resolvedPlayableMedia.resumePositionMs.coerceAtLeast(0L)
                 val source = awaitPlaybackSource(
                     activeSession = activeSession,
                     repository = repository,
-                    media = playableMedia,
-                    fallbackTitle = playableMedia.title.ifBlank { media.title },
+                    media = resolvedPlayableMedia,
+                    fallbackTitle = resolvedPlayableMedia.title.ifBlank { resolvedMedia.title },
                     trigger = "open-player",
                 )
-                Triple(playableMedia, source, initialPositionMs)
+                Triple(resolvedPlayableMedia, source, initialPositionMs)
             }.onSuccess { (playableMedia, source, initialPositionMs) ->
                 loadingGate.cancel()
                 if (requestGeneration != playbackRequestGeneration) {
@@ -246,7 +244,7 @@ class EmbyViewModel(
                 }
                 Log.w(
                     PlaybackWarmupDebugTag,
-                    "open failed itemId=${media.id} title=${media.title} elapsedMs=${SystemClock.elapsedRealtime() - startMs}",
+                    "open failed itemId=${resolvedMedia.id} title=${resolvedMedia.title} elapsedMs=${SystemClock.elapsedRealtime() - startMs}",
                     throwable,
                 )
                 _playbackState.value = PlaybackUiState.Error(
@@ -267,11 +265,20 @@ class EmbyViewModel(
             is PlaybackUiState.Error,
             PlaybackUiState.Idle,
             -> null
-        }
+        }?.let(::resolveMediaWithResume)
 
         if (activeMedia != null) {
             val profileId = activeServerProfileId
             val userId = session?.userId
+            if (!profileId.isNullOrBlank() && !userId.isNullOrBlank()) {
+                applyOptimisticResumeUpdate(
+                    media = activeMedia,
+                    positionMs = positionMs,
+                    durationMs = durationMs,
+                    serverProfileId = profileId,
+                    serverUserId = userId,
+                )
+            }
             viewModelScope.launch {
                 if (!profileId.isNullOrBlank() && !userId.isNullOrBlank()) {
                     continueWatchingStore.update(
@@ -350,9 +357,23 @@ class EmbyViewModel(
         }
     }
 
+    fun updateEmbeddedSubtitleLanguage(value: String) {
+        viewModelScope.launch {
+            settingsStore.updateEmbeddedSubtitleLanguage(value)
+        }
+    }
+
+    fun updateExternalSubtitleLanguage(value: String) {
+        viewModelScope.launch {
+            settingsStore.updateExternalSubtitleLanguage(value)
+        }
+    }
+
+    @Deprecated("Use updateEmbeddedSubtitleLanguage/updateExternalSubtitleLanguage")
     fun updateSubtitleMode(value: String) {
         viewModelScope.launch {
-            settingsStore.updateSubtitleMode(value)
+            settingsStore.updateEmbeddedSubtitleLanguage(value)
+            settingsStore.updateExternalSubtitleLanguage(value)
         }
     }
 
@@ -676,21 +697,14 @@ class EmbyViewModel(
     }
 
     fun loadMediaDetail(media: MediaItem) {
-        val scopedResumePosition = resolveScopedResumePosition(media.id)
-        val cachedMedia = (_mediaDetails.value[media.id] ?: media).copy(
-            resumePositionMs = maxOf(
-                _mediaDetails.value[media.id]?.resumePositionMs ?: 0L,
-                media.resumePositionMs,
-                scopedResumePosition,
-            ),
-        )
+        val cachedMedia = resolveMediaWithResume(media)
+        _mediaDetails.update { current -> current + (cachedMedia.id to cachedMedia) }
         prefetchPlaybackSourceIfPossible(cachedMedia)
         if (cachedMedia.isSeries) {
-            loadSeriesDetail(cachedMedia.id)
+            loadSeriesDetail(cachedMedia)
         }
 
         if (cachedMedia.actors.isNotEmpty()) {
-            _mediaDetails.update { current -> current + (cachedMedia.id to cachedMedia) }
             return
         }
 
@@ -705,27 +719,29 @@ class EmbyViewModel(
                 repository.loadMediaDetail(
                     userId = activeSession.userId,
                     token = activeSession.accessToken,
-                    itemId = media.id,
+                    itemId = cachedMedia.id,
                 )
             }.onSuccess { detail ->
                 val mergedDetail = detail.copy(
                     resumePositionMs = maxOf(
                         detail.resumePositionMs,
                         cachedMedia.resumePositionMs,
-                        scopedResumePosition,
                     ),
+                    seasonId = detail.seasonId ?: cachedMedia.seasonId,
+                    seasonNumber = detail.seasonNumber ?: cachedMedia.seasonNumber,
+                    episodeNumber = detail.episodeNumber ?: cachedMedia.episodeNumber,
                 )
                 prefetchPlaybackSourceIfPossible(mergedDetail)
                 _mediaDetails.update { current -> current + (mergedDetail.id to mergedDetail) }
                 if (mergedDetail.isSeries) {
-                    loadSeriesDetail(mergedDetail.id)
+                    loadSeriesDetail(mergedDetail)
                 }
             }.onFailure {
                 _mediaDetails.update { current ->
-                    if (current.containsKey(media.id)) current else current + (media.id to cachedMedia)
+                    if (current.containsKey(cachedMedia.id)) current else current + (cachedMedia.id to cachedMedia)
                 }
             }
-            detailLoadingIds.remove(media.id)
+            detailLoadingIds.remove(cachedMedia.id)
         }
     }
 
@@ -830,13 +846,22 @@ class EmbyViewModel(
         }
     }
 
-    private fun loadSeriesDetail(seriesId: String) {
+    private fun loadSeriesDetail(media: MediaItem) {
         val activeSession = session ?: return
         val repository = repository ?: return
+        val resolvedMedia = resolveMediaWithResume(media)
+        val seriesId = resolvedMedia.id
+        val preferredSeasonId = resolvedMedia.seasonId?.takeIf {
+            resolvedMedia.resumePositionMs > 0L && it.isNotBlank()
+        }
         val current = _seriesDetails.value[seriesId]
         val alreadyReady = current != null &&
             current.episodes.isNotEmpty() &&
-            (current.seasons.isEmpty() || current.selectedSeasonId != null)
+            (
+                current.seasons.isEmpty() ||
+                    current.selectedSeasonId == preferredSeasonId ||
+                    (preferredSeasonId == null && current.selectedSeasonId != null)
+                )
         if (current?.isLoading == true || alreadyReady) {
             return
         }
@@ -852,20 +877,34 @@ class EmbyViewModel(
 
         viewModelScope.launch {
             runCatching {
-                repository.loadSeriesContent(
+                val content = repository.loadSeriesContent(
                     userId = activeSession.userId,
                     token = activeSession.accessToken,
                     seriesId = seriesId,
                 )
-            }.onSuccess { content ->
+                val resolvedSelectedSeasonId = preferredSeasonId?.takeIf { preferredId ->
+                    content.seasons.any { it.id == preferredId }
+                } ?: content.selectedSeasonId
+                val resolvedEpisodes = if (
+                    preferredSeasonId != null &&
+                    resolvedSelectedSeasonId != content.selectedSeasonId
+                ) {
+                    repository.loadSeasonEpisodes(
+                        userId = activeSession.userId,
+                        token = activeSession.accessToken,
+                        seasonId = preferredSeasonId,
+                    )
+                } else {
+                    content.episodes
+                }
                 content.nextUpEpisode?.let(::prefetchPlaybackSourceIfPossible)
-                    ?: content.episodes.firstOrNull()?.let(::prefetchPlaybackSourceIfPossible)
+                    ?: resolvedEpisodes.firstOrNull()?.let(::prefetchPlaybackSourceIfPossible)
                 _seriesDetails.update { state ->
                     state + (
                         seriesId to SeriesDetailState(
                             seasons = content.seasons,
-                            selectedSeasonId = content.selectedSeasonId,
-                            episodes = content.episodes,
+                            selectedSeasonId = resolvedSelectedSeasonId,
+                            episodes = resolvedEpisodes,
                             nextUpEpisode = content.nextUpEpisode,
                             isLoading = false,
                             errorMessage = null,
@@ -1017,12 +1056,20 @@ class EmbyViewModel(
         val activeSession = session ?: return
         val activeRepository = repository ?: return
         val currentPayload = (_uiState.value as? EmbyUiState.Ready)?.payload ?: return
-    val targets = currentPayload.resumeItems
+        val targets = currentPayload.resumeItems
             .asSequence()
             .filterNot { it.isFolder }
             .filter { item ->
                 item.titleLogoUrl.isNullOrBlank() ||
-                    (item.isEpisode && !item.seriesId.isNullOrBlank() && item.seriesTitleLogoUrl.isNullOrBlank())
+                    (
+                        item.isEpisode &&
+                            !item.seriesId.isNullOrBlank() &&
+                            (
+                                item.seriesTitleLogoUrl.isNullOrBlank() ||
+                                    item.seriesPrimaryImageUrl.isNullOrBlank() ||
+                                    item.seriesBackdropImageUrl.isNullOrBlank()
+                                )
+                        )
             }
             .filterNot { resumeLogoAttemptedIds.contains(it.id) }
             .take(8)
@@ -1041,14 +1088,14 @@ class EmbyViewModel(
                         itemId = item.id,
                     )
                 }.onSuccess { detail ->
-                    val seriesTitleLogoUrl = if (detail.isEpisode && !detail.seriesId.isNullOrBlank()) {
+                    val seriesDetail = if (detail.isEpisode && !detail.seriesId.isNullOrBlank()) {
                         runCatching {
                             activeRepository.loadMediaDetail(
                                 userId = activeSession.userId,
                                 token = activeSession.accessToken,
                                 itemId = detail.seriesId,
                             )
-                        }.getOrNull()?.titleLogoUrl
+                        }.getOrNull()
                     } else {
                         null
                     }
@@ -1056,11 +1103,17 @@ class EmbyViewModel(
                         resumePositionMs = maxOf(
                             detail.resumePositionMs,
                             item.resumePositionMs,
-                            resolveScopedResumePosition(item.id),
+                            resolveScopedResumePosition(item),
                         ),
                         seriesTitleLogoUrl = detail.seriesTitleLogoUrl
-                            ?: seriesTitleLogoUrl
+                            ?: seriesDetail?.titleLogoUrl
                             ?: item.seriesTitleLogoUrl,
+                        seriesPrimaryImageUrl = detail.seriesPrimaryImageUrl
+                            ?: seriesDetail?.primaryImageUrl
+                            ?: item.seriesPrimaryImageUrl,
+                        seriesBackdropImageUrl = detail.seriesBackdropImageUrl
+                            ?: seriesDetail?.backdropImageUrl
+                            ?: item.seriesBackdropImageUrl,
                     )
                     _mediaDetails.update { current -> current + (item.id to enrichedDetail) }
                     serverPayload = serverPayload?.copy(
@@ -1081,7 +1134,7 @@ class EmbyViewModel(
                             payload = ready.payload.copy(
                                 resumeItems = ready.payload.resumeItems.map { resumeItem ->
                                     if (resumeItem.id == item.id) {
-                                        enrichedDetail.mergeWithLocalResume(resumeItem)
+                                        enrichedDetail.mergeWithResumeFallback(resumeItem)
                                     } else {
                                         resumeItem
                                     }
@@ -1108,18 +1161,188 @@ class EmbyViewModel(
             .toList()
     }
 
-    private fun resolveScopedResumePosition(mediaId: String): Long {
-        val profileId = activeServerProfileId ?: return 0L
+    private fun resolveScopedResumePosition(media: MediaItem): Long {
+        return resolveScopedResumeItem(media)?.resumePositionMs?.coerceAtLeast(0L) ?: 0L
+    }
+
+    private fun resolveMediaWithResume(media: MediaItem): MediaItem {
+        val cachedMedia = _mediaDetails.value[media.id]
+        val scopedResumeItem = resolveScopedResumeItem(media)
+        val cachedSeriesPrimaryImageUrl = media.seriesId
+            ?.takeIf { media.isEpisode && it.isNotBlank() }
+            ?.let { seriesId ->
+                _mediaDetails.value[seriesId]?.primaryImageUrl
+                    ?: _mediaDetails.value[seriesId]?.seriesPrimaryImageUrl
+            }
+        val cachedSeriesBackdropImageUrl = media.seriesId
+            ?.takeIf { media.isEpisode && it.isNotBlank() }
+            ?.let { seriesId ->
+                _mediaDetails.value[seriesId]?.backdropImageUrl
+                    ?: _mediaDetails.value[seriesId]?.seriesBackdropImageUrl
+            }
+        val resolvedMedia = (cachedMedia?.mergeWithResumeFallback(media) ?: media)
+            .mergeWithResumeFallback(scopedResumeItem ?: media)
+
+        return resolvedMedia.copy(
+            resumePositionMs = maxOf(
+                cachedMedia?.resumePositionMs ?: 0L,
+                media.resumePositionMs,
+                scopedResumeItem?.resumePositionMs ?: 0L,
+            ),
+            seasonId = media.seasonId ?: cachedMedia?.seasonId,
+            seasonNumber = media.seasonNumber ?: cachedMedia?.seasonNumber,
+            episodeNumber = media.episodeNumber ?: cachedMedia?.episodeNumber,
+            seriesPrimaryImageUrl = resolvedMedia.seriesPrimaryImageUrl ?: cachedSeriesPrimaryImageUrl,
+            seriesBackdropImageUrl = resolvedMedia.seriesBackdropImageUrl ?: cachedSeriesBackdropImageUrl,
+        )
+    }
+
+    private fun resolveScopedResumeItem(media: MediaItem): MediaItem? {
+        val profileId = activeServerProfileId ?: return null
         val userId = session?.userId
+        val exactMatch = cachedResumeEntries
+            .firstOrNull { entry ->
+                entry.serverProfileId == profileId &&
+                    (userId.isNullOrBlank() || entry.serverUserId == userId) &&
+                    entry.id == media.id
+            }
+            ?.toMediaItem()
+        if (exactMatch != null) {
+            return exactMatch
+        }
+        if (!media.isSeries && !media.isSeason) {
+            return null
+        }
         return cachedResumeEntries
             .firstOrNull { entry ->
-                entry.id == mediaId &&
-                    entry.serverProfileId == profileId &&
-                    (userId.isNullOrBlank() || entry.serverUserId == userId)
+                entry.serverProfileId == profileId &&
+                    (userId.isNullOrBlank() || entry.serverUserId == userId) &&
+                    resumeGroupingKey(entry) == resumeGroupingKey(media)
             }
-            ?.positionMs
-            ?.coerceAtLeast(0L)
-            ?: 0L
+            ?.toMediaItem()
+    }
+
+    private fun applyOptimisticResumeUpdate(
+        media: MediaItem,
+        positionMs: Long,
+        durationMs: Long,
+        serverProfileId: String,
+        serverUserId: String,
+    ) {
+        val keepResume = shouldKeepResume(
+            positionMs = positionMs,
+            durationMs = durationMs,
+            isFolder = media.isFolder,
+        )
+        val updatedEntries = cachedResumeEntries
+            .filterNot { entry ->
+                entry.serverProfileId == serverProfileId &&
+                    entry.serverUserId == serverUserId &&
+                    resumeGroupingKey(entry) == resumeGroupingKey(media)
+            }
+            .toMutableList()
+
+        if (keepResume) {
+            updatedEntries += ContinueWatchingEntry(
+                id = media.id,
+                serverProfileId = serverProfileId,
+                serverUserId = serverUserId,
+                title = media.title,
+                meta = media.meta,
+                summary = media.summary,
+                score = media.score,
+                year = media.year,
+                genres = media.genres,
+                primaryImageUrl = media.primaryImageUrl,
+                titleLogoUrl = media.titleLogoUrl,
+                seriesTitleLogoUrl = media.seriesTitleLogoUrl,
+                seriesPrimaryImageUrl = media.seriesPrimaryImageUrl,
+                seriesBackdropImageUrl = media.seriesBackdropImageUrl,
+                backdropImageUrl = media.backdropImageUrl,
+                extraFanartUrls = media.extraFanartUrls,
+                seriesId = media.seriesId,
+                seriesName = media.seriesName,
+                mediaType = media.mediaType,
+                seasonId = media.seasonId,
+                seasonNumber = media.seasonNumber,
+                episodeNumber = media.episodeNumber,
+                isFolder = media.isFolder,
+                positionMs = positionMs,
+                durationMs = durationMs,
+                updatedAt = System.currentTimeMillis(),
+            )
+        }
+
+        cachedResumeEntries = updatedEntries
+        syncScopedResumeItems()
+        serverPayload?.let { payload ->
+            _uiState.update { current ->
+                (current as? EmbyUiState.Ready)?.copy(
+                    payload = payload.withMergedResume(localResumeItems),
+                ) ?: current
+            }
+        }
+        val updatedMedia = resolveMediaWithResume(media).copy(
+            resumePositionMs = if (keepResume) positionMs else 0L,
+        )
+        _mediaDetails.update { current ->
+            current + (media.id to updatedMedia)
+        }
+
+        val seriesId = media.seriesId?.takeIf { it.isNotBlank() }
+        if (seriesId != null) {
+            val cachedSeries = _mediaDetails.value[seriesId]
+            if (cachedSeries != null) {
+                val refreshedSeries = resolveMediaWithResume(cachedSeries).copy(
+                    resumePositionMs = if (keepResume) positionMs else 0L,
+                    seasonId = media.seasonId ?: cachedSeries.seasonId,
+                    seasonNumber = media.seasonNumber ?: cachedSeries.seasonNumber,
+                    episodeNumber = media.episodeNumber ?: cachedSeries.episodeNumber,
+                )
+                _mediaDetails.update { current ->
+                    current + (seriesId to refreshedSeries)
+                }
+                _seriesDetails.update { state ->
+                    val currentSeries = state[seriesId] ?: return@update state
+                    val updatedEpisodes = currentSeries.episodes.map { episode ->
+                        if (episode.id == media.id) {
+                            episode.copy(
+                                resumePositionMs = if (keepResume) positionMs else 0L,
+                            )
+                        } else {
+                            episode
+                        }
+                    }
+                    val updatedNextUp = currentSeries.nextUpEpisode?.let { nextUp ->
+                        if (nextUp.id == media.id) {
+                            nextUp.copy(
+                                resumePositionMs = if (keepResume) positionMs else 0L,
+                            )
+                        } else {
+                            nextUp
+                        }
+                    }
+                    state + (
+                        seriesId to currentSeries.copy(
+                            episodes = updatedEpisodes,
+                            nextUpEpisode = updatedNextUp,
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    private fun shouldKeepResume(
+        positionMs: Long,
+        durationMs: Long,
+        isFolder: Boolean,
+    ): Boolean {
+        if (isFolder || durationMs <= 0L) return false
+        if (positionMs < 15_000L) return false
+        val progress = positionMs / durationMs.toFloat()
+        val remainingMs = durationMs - positionMs
+        return progress < 0.96f && remainingMs > 30_000L
     }
 
     private fun clearPlaybackPreparationCache() {
@@ -1334,45 +1557,66 @@ private fun mergeResumeItems(
 ): List<MediaItem> {
     val items = LinkedHashMap<String, MediaItem>()
     localItems.forEach { item ->
-        items[item.id] = item
+        val key = resumeGroupingKey(item)
+        if (!items.containsKey(key)) {
+            items[key] = item
+        }
     }
     serverItems.forEach { item ->
-        val localItem = items[item.id]
-        items[item.id] = if (localItem == null) {
+        val key = resumeGroupingKey(item)
+        val localItem = items[key]
+        items[key] = if (localItem == null) {
             item
         } else {
-            item.mergeWithLocalResume(localItem)
+            localItem.mergeWithResumeFallback(item)
         }
     }
     return items.values.toList()
 }
 
-private fun MediaItem.mergeWithLocalResume(
-    localResume: MediaItem,
+private fun MediaItem.mergeWithResumeFallback(
+    fallback: MediaItem,
 ): MediaItem = copy(
-    title = title.ifBlank { localResume.title },
-    subtitle = localResume.subtitle.ifBlank { subtitle },
-    meta = meta.ifBlank { localResume.meta },
-    summary = summary.ifBlank { localResume.summary },
-    score = score.ifBlank { localResume.score },
-    colors = if (colors.isNotEmpty()) colors else localResume.colors,
-    year = year.ifBlank { localResume.year },
-    genres = if (genres.isNotEmpty()) genres else localResume.genres,
-    primaryImageAspectRatio = primaryImageAspectRatio ?: localResume.primaryImageAspectRatio,
-    primaryImageUrl = primaryImageUrl ?: localResume.primaryImageUrl,
-    titleLogoUrl = titleLogoUrl ?: localResume.titleLogoUrl,
-    seriesTitleLogoUrl = seriesTitleLogoUrl ?: localResume.seriesTitleLogoUrl,
-    backdropImageUrl = backdropImageUrl ?: localResume.backdropImageUrl,
-    extraFanartUrls = if (extraFanartUrls.isNotEmpty()) extraFanartUrls else localResume.extraFanartUrls,
-    actors = if (actors.isNotEmpty()) actors else localResume.actors,
-    mediaType = mediaType.ifBlank { localResume.mediaType },
-    collectionType = collectionType.ifBlank { localResume.collectionType },
-    seriesId = seriesId ?: localResume.seriesId,
-    seriesName = seriesName.ifBlank { localResume.seriesName },
-    seasonId = seasonId ?: localResume.seasonId,
-    seasonNumber = seasonNumber ?: localResume.seasonNumber,
-    episodeNumber = episodeNumber ?: localResume.episodeNumber,
-    childCount = childCount ?: localResume.childCount,
-    unplayedItemCount = unplayedItemCount ?: localResume.unplayedItemCount,
-    resumePositionMs = maxOf(resumePositionMs, localResume.resumePositionMs),
+    title = title.ifBlank { fallback.title },
+    subtitle = subtitle.ifBlank { fallback.subtitle },
+    meta = meta.ifBlank { fallback.meta },
+    summary = summary.ifBlank { fallback.summary },
+    score = score.ifBlank { fallback.score },
+    colors = if (colors.isNotEmpty()) colors else fallback.colors,
+    year = year.ifBlank { fallback.year },
+    genres = if (genres.isNotEmpty()) genres else fallback.genres,
+    primaryImageAspectRatio = primaryImageAspectRatio ?: fallback.primaryImageAspectRatio,
+    primaryImageUrl = primaryImageUrl ?: fallback.primaryImageUrl,
+    titleLogoUrl = titleLogoUrl ?: fallback.titleLogoUrl,
+    seriesTitleLogoUrl = seriesTitleLogoUrl ?: fallback.seriesTitleLogoUrl,
+    seriesPrimaryImageUrl = seriesPrimaryImageUrl ?: fallback.seriesPrimaryImageUrl,
+    seriesBackdropImageUrl = seriesBackdropImageUrl ?: fallback.seriesBackdropImageUrl,
+    backdropImageUrl = backdropImageUrl ?: fallback.backdropImageUrl,
+    extraFanartUrls = if (extraFanartUrls.isNotEmpty()) extraFanartUrls else fallback.extraFanartUrls,
+    actors = if (actors.isNotEmpty()) actors else fallback.actors,
+    mediaType = mediaType.ifBlank { fallback.mediaType },
+    collectionType = collectionType.ifBlank { fallback.collectionType },
+    seriesId = seriesId ?: fallback.seriesId,
+    seriesName = seriesName.ifBlank { fallback.seriesName },
+    seasonId = seasonId ?: fallback.seasonId,
+    seasonNumber = seasonNumber ?: fallback.seasonNumber,
+    episodeNumber = episodeNumber ?: fallback.episodeNumber,
+    childCount = childCount ?: fallback.childCount,
+    unplayedItemCount = unplayedItemCount ?: fallback.unplayedItemCount,
+    resumePositionMs = maxOf(resumePositionMs, fallback.resumePositionMs),
 )
+
+private fun resumeGroupingKey(media: MediaItem): String = when {
+    !media.seriesId.isNullOrBlank() -> "series:${media.seriesId}"
+    media.isEpisode -> "series:${media.seriesName.takeIf { it.isNotBlank() } ?: media.id}"
+    media.isSeries -> "series:${media.id}"
+    else -> "item:${media.id}"
+}
+
+private fun resumeGroupingKey(entry: ContinueWatchingEntry): String = when {
+    !entry.seriesId.isNullOrBlank() -> "series:${entry.seriesId}"
+    entry.mediaType.equals("Episode", ignoreCase = true) ->
+        "series:${entry.seriesName.takeIf { it.isNotBlank() } ?: entry.id}"
+    entry.mediaType.equals("Series", ignoreCase = true) -> "series:${entry.id}"
+    else -> "item:${entry.id}"
+}

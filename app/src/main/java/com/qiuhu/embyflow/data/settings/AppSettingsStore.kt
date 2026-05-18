@@ -15,7 +15,8 @@ private val Context.settingsDataStore: DataStore<Preferences> by preferencesData
 
 data class AppSettings(
     val playerMode: String = PLAYER_MODE_DEFAULT,
-    val subtitleMode: String = SUBTITLE_MODE_DEFAULT,
+    val embeddedSubtitleLanguage: String = SUBTITLE_LANGUAGE_PREFERENCE_DEFAULT,
+    val externalSubtitleLanguage: String = SUBTITLE_LANGUAGE_PREFERENCE_DEFAULT,
     val layoutMode: String = LAYOUT_MODE_DEFAULT,
     val showLibraryCardTitle: Boolean = SHOW_LIBRARY_CARD_TITLE_DEFAULT,
     val librarySortMode: String = LIBRARY_SORT_MODE_DEFAULT,
@@ -35,7 +36,23 @@ const val PLAYER_MODE_COMPATIBILITY = "兼容优先"
 const val PLAYER_MODE_STANDARD = "标准模式"
 const val PLAYER_MODE_SYSTEM = "快速起播"
 const val PLAYER_MODE_DEFAULT = PLAYER_MODE_COMPATIBILITY
-const val SUBTITLE_MODE_DEFAULT = "双语优先"
+const val SUBTITLE_LANGUAGE_PREFERENCE_FOLLOW_DEFAULT = "跟随默认"
+const val SUBTITLE_LANGUAGE_PREFERENCE_CHINESE = "中文优先"
+const val SUBTITLE_LANGUAGE_PREFERENCE_SIMPLIFIED_CHINESE = "简体中文优先"
+const val SUBTITLE_LANGUAGE_PREFERENCE_TRADITIONAL_CHINESE = "繁体中文优先"
+const val SUBTITLE_LANGUAGE_PREFERENCE_ENGLISH = "英文优先"
+const val SUBTITLE_LANGUAGE_PREFERENCE_JAPANESE = "日文优先"
+const val SUBTITLE_LANGUAGE_PREFERENCE_KOREAN = "韩文优先"
+const val SUBTITLE_LANGUAGE_PREFERENCE_DEFAULT = SUBTITLE_LANGUAGE_PREFERENCE_CHINESE
+val SUBTITLE_LANGUAGE_PREFERENCES = listOf(
+    SUBTITLE_LANGUAGE_PREFERENCE_FOLLOW_DEFAULT,
+    SUBTITLE_LANGUAGE_PREFERENCE_CHINESE,
+    SUBTITLE_LANGUAGE_PREFERENCE_SIMPLIFIED_CHINESE,
+    SUBTITLE_LANGUAGE_PREFERENCE_TRADITIONAL_CHINESE,
+    SUBTITLE_LANGUAGE_PREFERENCE_ENGLISH,
+    SUBTITLE_LANGUAGE_PREFERENCE_JAPANESE,
+    SUBTITLE_LANGUAGE_PREFERENCE_KOREAN,
+)
 const val LAYOUT_MODE_DEFAULT = "编辑卡片流"
 const val SHOW_LIBRARY_CARD_TITLE_DEFAULT = true
 const val LIBRARY_SORT_MODE_DEFAULT = "最近更新"
@@ -67,6 +84,28 @@ fun normalizeLibrarySortMode(value: String): String = when (value) {
     LIBRARY_SORT_MODE_RATING,
     -> value
     else -> LIBRARY_SORT_MODE_DEFAULT
+}
+
+fun normalizeSubtitleLanguagePreference(value: String): String = when (value) {
+    SUBTITLE_LANGUAGE_PREFERENCE_FOLLOW_DEFAULT,
+    SUBTITLE_LANGUAGE_PREFERENCE_CHINESE,
+    SUBTITLE_LANGUAGE_PREFERENCE_SIMPLIFIED_CHINESE,
+    SUBTITLE_LANGUAGE_PREFERENCE_TRADITIONAL_CHINESE,
+    SUBTITLE_LANGUAGE_PREFERENCE_ENGLISH,
+    SUBTITLE_LANGUAGE_PREFERENCE_JAPANESE,
+    SUBTITLE_LANGUAGE_PREFERENCE_KOREAN,
+    -> value
+    "双语优先" -> SUBTITLE_LANGUAGE_PREFERENCE_CHINESE
+    "原语言优先" -> SUBTITLE_LANGUAGE_PREFERENCE_FOLLOW_DEFAULT
+    "仅外挂字幕" -> SUBTITLE_LANGUAGE_PREFERENCE_CHINESE
+    "关闭自动匹配" -> SUBTITLE_LANGUAGE_PREFERENCE_FOLLOW_DEFAULT
+    "中文优先" -> SUBTITLE_LANGUAGE_PREFERENCE_CHINESE
+    "简体中文优先" -> SUBTITLE_LANGUAGE_PREFERENCE_SIMPLIFIED_CHINESE
+    "繁体中文优先" -> SUBTITLE_LANGUAGE_PREFERENCE_TRADITIONAL_CHINESE
+    "英文优先" -> SUBTITLE_LANGUAGE_PREFERENCE_ENGLISH
+    "日文优先" -> SUBTITLE_LANGUAGE_PREFERENCE_JAPANESE
+    "韩文优先" -> SUBTITLE_LANGUAGE_PREFERENCE_KOREAN
+    else -> SUBTITLE_LANGUAGE_PREFERENCE_DEFAULT
 }
 
 fun normalizeLayoutMode(value: String): String = when (value) {
@@ -101,9 +140,19 @@ class AppSettingsStore(
     private val dataStore = context.settingsDataStore
 
     val settings: Flow<AppSettings> = dataStore.data.map { preferences ->
+        val legacySubtitlePreference = preferences[Keys.SubtitleMode]
         AppSettings(
             playerMode = normalizePlayerMode(preferences[Keys.PlayerMode] ?: PLAYER_MODE_DEFAULT),
-            subtitleMode = preferences[Keys.SubtitleMode] ?: SUBTITLE_MODE_DEFAULT,
+            embeddedSubtitleLanguage = normalizeSubtitleLanguagePreference(
+                preferences[Keys.EmbeddedSubtitleLanguage]
+                    ?: legacySubtitlePreference
+                    ?: SUBTITLE_LANGUAGE_PREFERENCE_DEFAULT,
+            ),
+            externalSubtitleLanguage = normalizeSubtitleLanguagePreference(
+                preferences[Keys.ExternalSubtitleLanguage]
+                    ?: legacySubtitlePreference
+                    ?: SUBTITLE_LANGUAGE_PREFERENCE_DEFAULT,
+            ),
             layoutMode = normalizeLayoutMode(preferences[Keys.LayoutMode] ?: LAYOUT_MODE_DEFAULT),
             showLibraryCardTitle = preferences[Keys.ShowLibraryCardTitle] ?: SHOW_LIBRARY_CARD_TITLE_DEFAULT,
             librarySortMode = normalizeLibrarySortMode(preferences[Keys.LibrarySortMode] ?: LIBRARY_SORT_MODE_DEFAULT),
@@ -117,8 +166,12 @@ class AppSettingsStore(
         dataStore.edit { it[Keys.PlayerMode] = normalizePlayerMode(value) }
     }
 
-    suspend fun updateSubtitleMode(value: String) {
-        dataStore.edit { it[Keys.SubtitleMode] = value }
+    suspend fun updateEmbeddedSubtitleLanguage(value: String) {
+        dataStore.edit { it[Keys.EmbeddedSubtitleLanguage] = normalizeSubtitleLanguagePreference(value) }
+    }
+
+    suspend fun updateExternalSubtitleLanguage(value: String) {
+        dataStore.edit { it[Keys.ExternalSubtitleLanguage] = normalizeSubtitleLanguagePreference(value) }
     }
 
     suspend fun updateLayoutMode(value: String) {
@@ -140,6 +193,8 @@ class AppSettingsStore(
     private object Keys {
         val PlayerMode = stringPreferencesKey("player_mode")
         val SubtitleMode = stringPreferencesKey("subtitle_mode")
+        val EmbeddedSubtitleLanguage = stringPreferencesKey("embedded_subtitle_language")
+        val ExternalSubtitleLanguage = stringPreferencesKey("external_subtitle_language")
         val LayoutMode = stringPreferencesKey("layout_mode")
         val ShowLibraryCardTitle = booleanPreferencesKey("show_library_card_title")
         val LibrarySortMode = stringPreferencesKey("library_sort_mode")

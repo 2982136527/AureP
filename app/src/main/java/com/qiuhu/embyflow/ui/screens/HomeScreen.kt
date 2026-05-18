@@ -59,8 +59,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -94,6 +96,7 @@ private const val TodayHighlightsAutoScrollResumeDelayMillis = 2200L
 private const val TodayHighlightsAutoScrollPollingMillis = 120L
 private val TodayHighlightsAutoScrollSpeed = 18.dp
 private const val TodayHeroPrefetchCount = 6
+private const val TodayResumeVisibleCards = 1.5f
 
 @Composable
 fun HomeScreen(
@@ -117,7 +120,9 @@ fun HomeScreen(
     val highlights = highlightItems.take(8)
     val isLargeLayout = layoutMode == "大图优先"
     val isCompactLayout = layoutMode == "紧凑信息流"
-    val resumeItems = continueWatchingItems.take(
+    val resumeItems = continueWatchingItems
+        .distinctBy { it.continueWatchingDisplayKey() }
+        .take(
         when {
             isCompactLayout -> 8
             isLargeLayout -> 4
@@ -134,15 +139,10 @@ fun HomeScreen(
         isLargeLayout -> 276.dp
         else -> 236.dp
     }
-    val resumeCardWidth = when {
-        isCompactLayout -> 236.dp
-        isLargeLayout -> 344.dp
-        else -> 292.dp
-    }
-    val resumeCardHeight = when {
-        isCompactLayout -> 188.dp
-        isLargeLayout -> 256.dp
-        else -> 220.dp
+    val resumeCardHeightRatio = when {
+        isCompactLayout -> 188f / 236f
+        isLargeLayout -> 256f / 344f
+        else -> 220f / 292f
     }
     val libraryPreviewCount = when {
         isCompactLayout -> 6
@@ -233,21 +233,12 @@ fun HomeScreen(
                     }
                 } else {
                     item {
-                        LazyRow(
-                            contentPadding = PaddingValues(horizontal = 16.dp),
-                            horizontalArrangement = Arrangement.spacedBy(rowSpacing),
-                        ) {
-                            items(resumeItems) { item ->
-                                TodayFeatureCard(
-                                    media = item,
-                                    modifier = Modifier.width(resumeCardWidth),
-                                    height = resumeCardHeight,
-                                    transparentFooter = true,
-                                    preferTitleLogo = true,
-                                    onClick = { onOpenMedia(item) },
-                                )
-                            }
-                        }
+                        TodayContinueWatchingRow(
+                            items = resumeItems,
+                            itemSpacing = rowSpacing,
+                            cardHeightRatio = resumeCardHeightRatio,
+                            onOpenMedia = onOpenMedia,
+                        )
                     }
                 }
 
@@ -266,6 +257,77 @@ fun HomeScreen(
             }
         }
     }
+}
+
+@Composable
+private fun TodayContinueWatchingRow(
+    items: List<MediaItem>,
+    itemSpacing: Dp,
+    cardHeightRatio: Float,
+    onOpenMedia: (MediaItem) -> Unit,
+) {
+    BoxWithConstraints(
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        val horizontalPadding = 16.dp
+        val visibleGapCount = (TodayResumeVisibleCards - 0.5f).coerceAtLeast(0f)
+        val cardWidth = ((maxWidth - (horizontalPadding * 2) - (itemSpacing * visibleGapCount)) / TodayResumeVisibleCards)
+        val cardHeight = cardWidth * cardHeightRatio
+
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = horizontalPadding),
+            horizontalArrangement = Arrangement.spacedBy(itemSpacing),
+        ) {
+            items(items) { item ->
+                TodayFeatureCard(
+                    media = item,
+                    modifier = Modifier.width(cardWidth),
+                    height = cardHeight,
+                    imageUrlOverride = item.continueWatchingCardImageUrl(),
+                    transparentFooter = true,
+                    preferTitleLogo = true,
+                    topLeftLabel = item.subtitle,
+                    plainTopLabels = true,
+                    onClick = { onOpenMedia(item.continueWatchingNavigationTarget()) },
+                )
+            }
+        }
+    }
+}
+
+private fun MediaItem.continueWatchingNavigationTarget(): MediaItem {
+    val targetSeriesId = seriesId?.takeIf { isEpisode && it.isNotBlank() } ?: return this
+    return copy(
+        id = targetSeriesId,
+        title = seriesName.ifBlank { title },
+        subtitle = "",
+        meta = "",
+        summary = "",
+        score = "",
+        primaryImageUrl = seriesPrimaryImageUrl ?: primaryImageUrl,
+        backdropImageUrl = seriesBackdropImageUrl ?: backdropImageUrl,
+        titleLogoUrl = seriesTitleLogoUrl ?: titleLogoUrl,
+        seriesTitleLogoUrl = null,
+        mediaType = "Series",
+        seriesId = null,
+        seriesName = "",
+        childCount = null,
+        unplayedItemCount = null,
+    )
+}
+
+private fun MediaItem.continueWatchingCardImageUrl(): String? {
+    return if (isEpisode) {
+        primaryImageUrl ?: seriesBackdropImageUrl ?: backdropImageUrl
+    } else {
+        backdropImageUrl ?: primaryImageUrl
+    }
+}
+
+private fun MediaItem.continueWatchingDisplayKey(): String = when {
+    !seriesId.isNullOrBlank() -> "series:$seriesId"
+    isEpisode -> "series:${seriesName.takeIf { it.isNotBlank() } ?: id}"
+    else -> "item:$id"
 }
 
 @Composable
@@ -696,14 +758,17 @@ private fun TodayFeatureCard(
     media: MediaItem,
     modifier: Modifier = Modifier,
     height: Dp,
+    imageUrlOverride: String? = null,
     imageContentScale: ContentScale = ContentScale.Crop,
     adaptCardToImage: Boolean = false,
     transparentFooter: Boolean = false,
     preferTitleLogo: Boolean = false,
+    topLeftLabel: String? = null,
+    plainTopLabels: Boolean = false,
     onClick: () -> Unit,
 ) {
     val shape = RoundedCornerShape(16.dp)
-    val imageUrl = media.backdropImageUrl ?: media.primaryImageUrl
+    val imageUrl = imageUrlOverride ?: (media.backdropImageUrl ?: media.primaryImageUrl)
     val badgeLabel = media.cardEpisodeBadgeLabel()
     var imageAspectRatio by remember(imageUrl) { mutableStateOf(16f / 9f) }
     val cardSizeModifier = if (adaptCardToImage) {
@@ -740,13 +805,40 @@ private fun TodayFeatureCard(
             },
         )
 
+        if (!topLeftLabel.isNullOrBlank()) {
+            if (plainTopLabels) {
+                TodayTopOverlayLabel(
+                    text = topLeftLabel,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(12.dp),
+                )
+            } else {
+                MediaPosterCornerBadge(
+                    text = topLeftLabel,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(12.dp),
+                )
+            }
+        }
+
         if (!badgeLabel.isNullOrBlank()) {
-            MediaPosterCornerBadge(
-                text = badgeLabel,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(12.dp),
-            )
+            if (plainTopLabels) {
+                TodayTopOverlayLabel(
+                    text = badgeLabel,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(12.dp),
+                )
+            } else {
+                MediaPosterCornerBadge(
+                    text = badgeLabel,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(12.dp),
+                )
+            }
         }
 
         Box(
@@ -774,9 +866,31 @@ private fun TodayFeatureCard(
                 media = media,
                 transparent = transparentFooter,
                 preferTitleLogo = preferTitleLogo,
+                topLeftLabel = topLeftLabel,
             )
         }
     }
+}
+
+@Composable
+private fun TodayTopOverlayLabel(
+    text: String,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        text = text,
+        modifier = modifier,
+        style = MaterialTheme.typography.labelSmall.copy(
+            shadow = Shadow(
+                color = Color.Black.copy(alpha = 0.55f),
+                offset = Offset(0f, 1.5f),
+                blurRadius = 6f,
+            ),
+        ),
+        color = Color.White,
+        fontWeight = FontWeight.Bold,
+        maxLines = 1,
+    )
 }
 
 @Composable
@@ -785,6 +899,7 @@ private fun TodayCardFooter(
     compact: Boolean = false,
     transparent: Boolean = false,
     preferTitleLogo: Boolean = false,
+    topLeftLabel: String? = null,
 ) {
     Box(
         modifier = Modifier
@@ -827,13 +942,15 @@ private fun TodayCardFooter(
                     preferTitleLogo = preferTitleLogo,
                 )
             }
-            Text(
-                text = media.subtitle.ifBlank { media.meta },
-                style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.bodySmall,
-                color = Color.White.copy(alpha = 0.78f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            if (topLeftLabel.isNullOrBlank()) {
+                Text(
+                    text = media.subtitle.ifBlank { media.meta },
+                    style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.bodySmall,
+                    color = Color.White.copy(alpha = 0.78f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }

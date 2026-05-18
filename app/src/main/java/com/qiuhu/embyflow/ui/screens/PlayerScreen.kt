@@ -131,6 +131,13 @@ import com.qiuhu.embyflow.data.settings.AppSettings
 import com.qiuhu.embyflow.data.settings.PLAYER_MODE_COMPATIBILITY
 import com.qiuhu.embyflow.data.settings.PLAYER_MODE_STANDARD
 import com.qiuhu.embyflow.data.settings.PLAYER_MODE_SYSTEM
+import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_CHINESE
+import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_ENGLISH
+import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_FOLLOW_DEFAULT
+import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_JAPANESE
+import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_KOREAN
+import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_SIMPLIFIED_CHINESE
+import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_TRADITIONAL_CHINESE
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
@@ -170,11 +177,18 @@ fun PlayerScreen(
     val runtimeProfile = remember(settings.playerMode) {
         settings.toPlayerRuntimeProfile()
     }
-    val playableSubtitleTracks = remember(source.subtitleTracks) {
-        source.subtitleTracks.filter { it.isExternal }
+    val availableSubtitleTracks = remember(source.subtitleTracks) {
+        source.subtitleTracks
     }
-    val autoSubtitleTracks = remember(playableSubtitleTracks, settings.subtitleMode) {
-        playableSubtitleTracks.applySubtitleStrategy(settings.subtitleMode)
+    val autoSubtitleTracks = remember(
+        availableSubtitleTracks,
+        settings.embeddedSubtitleLanguage,
+        settings.externalSubtitleLanguage,
+    ) {
+        availableSubtitleTracks.resolveAutomaticSubtitleSelection(
+            embeddedLanguagePreference = settings.embeddedSubtitleLanguage,
+            externalLanguagePreference = settings.externalSubtitleLanguage,
+        )
     }
     val streamOptions = remember(source.streamOptions, source.streamUrl) {
         if (source.streamOptions.isNotEmpty()) {
@@ -306,19 +320,19 @@ fun PlayerScreen(
         mutableStateOf(false)
     }
 
-    val activeSubtitleTracks = remember(playableSubtitleTracks, autoSubtitleTracks, selectedSubtitleIndex) {
+    val activeSubtitleTracks = remember(availableSubtitleTracks, autoSubtitleTracks, selectedSubtitleIndex) {
         when (selectedSubtitleIndex) {
             null -> autoSubtitleTracks
             SUBTITLE_OFF -> emptyList()
-            else -> playableSubtitleTracks
+            else -> availableSubtitleTracks
                 .filter { it.index == selectedSubtitleIndex }
                 .map { it.copy(isDefault = true) }
         }
     }
-    val subtitleChoiceLabel = remember(playableSubtitleTracks, autoSubtitleTracks, selectedSubtitleIndex) {
+    val subtitleChoiceLabel = remember(availableSubtitleTracks, autoSubtitleTracks, selectedSubtitleIndex) {
         formatSubtitleChoiceLabel(
             selectedSubtitleIndex = selectedSubtitleIndex,
-            sourceTracks = playableSubtitleTracks,
+            sourceTracks = availableSubtitleTracks,
             autoTracks = autoSubtitleTracks,
         )
     }
@@ -334,10 +348,20 @@ fun PlayerScreen(
     val sourceAudioCodec = remember(source.infoFields) {
         source.infoFields.firstOrNull { it.label == "音频编码" }?.value.orEmpty()
     }
-    val sourceRequiresCompatibilityBackend = remember(sourceContainer, sourceVideoCodec) {
+    val sourceRequiresCompatibilityBackend = remember(
+        sourceContainer,
+        sourceVideoCodec,
+        activeStreamOption.id,
+        activeStreamOption.streamUrl,
+        source.infoLine,
+    ) {
         shouldPreferCompatibilityBackend(
             container = sourceContainer,
             videoCodec = sourceVideoCodec,
+        ) || shouldPreferCompatibilityBackendForStreamOption(
+            optionId = activeStreamOption.id,
+            streamUrl = activeStreamOption.streamUrl,
+            infoLine = source.infoLine,
         )
     }
     val preferredBackendKind = if (
@@ -352,7 +376,6 @@ fun PlayerScreen(
     val experimentalDualBackendRace = remember(
         settings.experimentalDualBackendRace,
         forceVlcCompatibilityBackend,
-        runtimeProfile.backendKind,
         sourceContainer,
         sourceVideoCodec,
         sourceAudioCodec,
@@ -360,7 +383,6 @@ fun PlayerScreen(
     ) {
         settings.experimentalDualBackendRace &&
             !forceVlcCompatibilityBackend &&
-            runtimeProfile.backendKind == PlayerBackendKind.Exo &&
             !sourceRequiresCompatibilityBackend &&
             shouldUseDualBackendRace(
                 container = sourceContainer,
@@ -956,14 +978,19 @@ fun PlayerScreen(
                         forceCompatibilityBackend(error.errorCodeName.ifBlank { "容器不支持" })
                         return
                     }
-                    if (!attemptAutoFallback(error.errorCodeName.ifBlank { "播放失败" })) {
-                        mainHandler.post {
-                            Toast.makeText(
-                                context.applicationContext,
-                                "当前片源暂时无法播放，请切换播放方式再试",
-                                Toast.LENGTH_SHORT,
-                            ).show()
-                        }
+                    if (attemptAutoFallback(error.errorCodeName.ifBlank { "播放失败" })) {
+                        return
+                    }
+                    if (activeBackendKind == PlayerBackendKind.Exo) {
+                        forceCompatibilityBackend(error.errorCodeName.ifBlank { "Exo异常" })
+                        return
+                    }
+                    mainHandler.post {
+                        Toast.makeText(
+                            context.applicationContext,
+                            "当前片源暂时无法播放，请切换播放方式再试",
+                            Toast.LENGTH_SHORT,
+                        ).show()
                     }
                 }
             }
@@ -1146,14 +1173,21 @@ fun PlayerScreen(
                 PlayerDebugTag,
                 "startup timeout title=$title mediaId=$mediaId option=${activeStreamOption.id} backend=$activeBackendKind race=$raceInProgress state=${playbackStateSnapshot()} bytes=${playbackTrafficTracker.totalBytesRead()} entry=${activeStreamOption.streamUrl} resolved=$resolvedPlaybackUrl",
             )
-            if (!attemptAutoFallback("起播超时")) {
-                mainHandler.post {
-                    Toast.makeText(
-                        context.applicationContext,
-                        "当前片源长时间未起播，请切换播放方式再试",
-                        Toast.LENGTH_SHORT,
-                    ).show()
-                }
+            if (attemptAutoFallback("起播超时")) {
+                return@LaunchedEffect
+            }
+            if (activeBackendKind == PlayerBackendKind.Exo) {
+                forceCompatibilityBackend(
+                    if (sourceRequiresCompatibilityBackend) "老封装起播超时" else "Exo起播超时",
+                )
+                return@LaunchedEffect
+            }
+            mainHandler.post {
+                Toast.makeText(
+                    context.applicationContext,
+                    "当前片源长时间未起播，请切换播放方式再试",
+                    Toast.LENGTH_SHORT,
+                ).show()
             }
         }
     }
@@ -1623,7 +1657,7 @@ fun PlayerScreen(
                         when {
                             showSubtitleSheet -> PlayerSubtitleSheet(
                                 subtitleOptions = buildSubtitleOptions(
-                                    sourceTracks = playableSubtitleTracks,
+                                    sourceTracks = availableSubtitleTracks,
                                     autoTracks = autoSubtitleTracks,
                                     selectedSubtitleIndex = selectedSubtitleIndex,
                                 ),
@@ -2726,9 +2760,7 @@ private fun buildSubtitleOptions(
                     title = track.label,
                     subtitle = buildString {
                         append(track.language ?: "未标记语言")
-                        if (track.isExternal) {
-                            append(" · 外挂")
-                        }
+                        append(if (track.isExternal) " · 外挂" else " · 内嵌")
                     },
                     targetIndex = track.index,
                     selected = selectedSubtitleIndex == track.index,
@@ -2930,6 +2962,25 @@ private fun shouldPreferCompatibilityBackend(
     )
 }
 
+private fun shouldPreferCompatibilityBackendForStreamOption(
+    optionId: String,
+    streamUrl: String,
+    infoLine: String,
+): Boolean {
+    val normalizedOptionId = optionId.trim().lowercase(Locale.US)
+    if (normalizedOptionId != "server-direct") return false
+
+    val normalizedUrl = streamUrl.trim().lowercase(Locale.US)
+    val normalizedInfoLine = infoLine.trim().lowercase(Locale.US)
+    val proxyHint = normalizedUrl.contains("play_source=emby_proxy") ||
+        normalizedUrl.contains("content_identity=")
+    val remoteHint = normalizedInfoLine.contains("isremote=true") ||
+        normalizedInfoLine.contains("strm") ||
+        normalizedInfoLine.contains("网络直链")
+
+    return proxyHint || (normalizedUrl.contains("/play/") && remoteHint)
+}
+
 private fun shouldUseDualBackendRace(
     container: String,
     videoCodec: String,
@@ -2974,7 +3025,7 @@ private fun shouldUseDualBackendRace(
 private fun runtimeModeDescription(label: String): String = when (label) {
     PLAYER_MODE_SYSTEM -> "更贴近系统直解，起播更快，适合常见 MP4 / MKV / HLS 源流。"
     PLAYER_MODE_COMPATIBILITY -> "使用 VLC 兼容内核，优先兜住挑封装、老编码和 Exo 难解的片源。"
-    else -> "均衡模式，兼顾启动速度、兼容性和日常播放稳定性。"
+    else -> "默认先走 VLC，再按片源情况回退，兼顾兼容性和日常起播速度。"
 }
 
 private fun Context.findActivity(): Activity? = when (this) {
@@ -3028,41 +3079,113 @@ private fun AppSettings.toPlayerRuntimeProfile(): PlayerRuntimeProfile = when (p
     )
 
     else -> PlayerRuntimeProfile(
-        backendKind = PlayerBackendKind.Exo,
+        backendKind = PlayerBackendKind.Vlc,
         label = PLAYER_MODE_STANDARD,
         decoderFallback = true,
-        minBufferMs = 12_000,
-        maxBufferMs = 48_000,
-        bufferForPlaybackMs = 1_200,
-        bufferForPlaybackAfterRebufferMs = 2_200,
+        minBufferMs = 10_000,
+        maxBufferMs = 42_000,
+        bufferForPlaybackMs = 1_100,
+        bufferForPlaybackAfterRebufferMs = 2_000,
         seekBackMs = 5_000L,
         seekForwardMs = 10_000L,
     )
 }
 
-private fun List<EmbySubtitleTrack>.applySubtitleStrategy(strategy: String): List<EmbySubtitleTrack> {
-    if (isEmpty()) return this
+private fun List<EmbySubtitleTrack>.resolveAutomaticSubtitleSelection(
+    embeddedLanguagePreference: String,
+    externalLanguagePreference: String,
+): List<EmbySubtitleTrack> {
+    if (isEmpty()) return emptyList()
 
-    val preferred = when (strategy) {
-        "双语优先" -> firstOrNull { track ->
-            val text = "${track.label} ${track.language.orEmpty()}".lowercase()
-            text.contains("双") || text.contains("中") || text.contains("zh")
-        } ?: firstOrNull { it.isDefault }
+    val embeddedTracks = filterNot { it.isExternal }
+    val externalTracks = filter { it.isExternal }
+    val preferred = when {
+        embeddedTracks.isNotEmpty() -> embeddedTracks.findPreferredSubtitle(embeddedLanguagePreference)
+        externalTracks.isNotEmpty() -> externalTracks.findPreferredSubtitle(externalLanguagePreference)
+        else -> null
+    } ?: return emptyList()
 
-        "原语言优先" -> firstOrNull { track ->
-            val language = track.language.orEmpty().lowercase()
-            language.isNotBlank() && language != "zh" && language != "chi" && language != "zho"
-        } ?: firstOrNull { !it.isExternal } ?: firstOrNull { it.isDefault }
+    return listOf(
+        preferred.copy(isDefault = true),
+    )
+}
 
-        "仅外挂字幕" -> firstOrNull { it.isExternal }
-        "关闭自动匹配" -> null
-        else -> firstOrNull { it.isDefault }
+private fun List<EmbySubtitleTrack>.findPreferredSubtitle(
+    languagePreference: String,
+): EmbySubtitleTrack? {
+    return when (languagePreference) {
+        SUBTITLE_LANGUAGE_PREFERENCE_FOLLOW_DEFAULT -> firstOrNull { it.isDefault } ?: firstOrNull()
+        else -> firstOrNull { it.matchesLanguagePreference(languagePreference) }
+            ?: firstOrNull { it.isDefault }
+            ?: firstOrNull()
     }
+}
 
-    return map { track ->
-        track.copy(
-            isDefault = preferred?.index == track.index,
-        )
+private fun EmbySubtitleTrack.matchesLanguagePreference(
+    languagePreference: String,
+): Boolean {
+    val languageCode = language.orEmpty().lowercase(Locale.US)
+    val displayText = label.lowercase(Locale.US)
+
+    return when (languagePreference) {
+        SUBTITLE_LANGUAGE_PREFERENCE_CHINESE -> {
+            displayText.contains("中") ||
+                displayText.contains("双语") ||
+                displayText.contains("chinese") ||
+                languageCode == "zh" ||
+                languageCode.startsWith("zh-") ||
+                languageCode == "chi" ||
+                languageCode == "zho" ||
+                languageCode == "chs" ||
+                languageCode == "cht" ||
+                languageCode == "zhs" ||
+                languageCode == "zht"
+        }
+
+        SUBTITLE_LANGUAGE_PREFERENCE_SIMPLIFIED_CHINESE -> {
+            displayText.contains("简体") ||
+                displayText.contains("简中") ||
+                displayText.contains("chs") ||
+                languageCode == "chs" ||
+                languageCode == "zhs"
+        }
+
+        SUBTITLE_LANGUAGE_PREFERENCE_TRADITIONAL_CHINESE -> {
+            displayText.contains("繁体") ||
+                displayText.contains("繁中") ||
+                displayText.contains("cht") ||
+                languageCode == "cht" ||
+                languageCode == "zht"
+        }
+
+        SUBTITLE_LANGUAGE_PREFERENCE_ENGLISH -> {
+            displayText.contains("english") ||
+                displayText.contains("英文") ||
+                displayText.contains("英语") ||
+                languageCode == "en" ||
+                languageCode.startsWith("en-") ||
+                languageCode == "eng"
+        }
+
+        SUBTITLE_LANGUAGE_PREFERENCE_JAPANESE -> {
+            displayText.contains("日文") ||
+                displayText.contains("日语") ||
+                displayText.contains("japanese") ||
+                languageCode == "ja" ||
+                languageCode.startsWith("ja-") ||
+                languageCode == "jpn"
+        }
+
+        SUBTITLE_LANGUAGE_PREFERENCE_KOREAN -> {
+            displayText.contains("韩文") ||
+                displayText.contains("韩语") ||
+                displayText.contains("korean") ||
+                languageCode == "ko" ||
+                languageCode.startsWith("ko-") ||
+                languageCode == "kor"
+        }
+
+        else -> false
     }
 }
 

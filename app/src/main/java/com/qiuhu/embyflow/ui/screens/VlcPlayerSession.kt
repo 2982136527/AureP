@@ -163,6 +163,8 @@ internal class VlcPlayerSession(
         requestHeaders: Map<String, String>,
     ) {
         setVolume(playbackVolume)
+        val externalSubtitleTracks = subtitleTracks.filter { it.isExternal }
+        val embeddedSubtitleTracks = subtitleTracks.filterNot { it.isExternal }
         val preparedMedia = Media(libVlc, Uri.parse(streamUrl)).apply {
             setHWDecoderEnabled(!forceSoftwareDecode, !forceSoftwareDecode)
             addOption(":input-fast-seek")
@@ -174,11 +176,11 @@ internal class VlcPlayerSession(
         }
         Log.i(
             Tag,
-            "prepare url=$streamUrl forceSoftwareDecode=$forceSoftwareDecode subtitles=${subtitleTracks.size}",
+            "prepare url=$streamUrl forceSoftwareDecode=$forceSoftwareDecode subtitles=${subtitleTracks.size} external=${externalSubtitleTracks.size} embedded=${embeddedSubtitleTracks.size}",
         )
         media = preparedMedia
         mediaPlayer.media = preparedMedia
-        subtitleTracks.forEach { track ->
+        externalSubtitleTracks.forEach { track ->
             val subtitleUri = runCatching { Uri.parse(track.url) }.getOrNull() ?: return@forEach
             runCatching {
                 mediaPlayer.addSlave(
@@ -189,6 +191,12 @@ internal class VlcPlayerSession(
             }.onFailure { error ->
                 Log.w(Tag, "failed to attach subtitle=${track.label} url=${track.url}", error)
             }
+        }
+        if (embeddedSubtitleTracks.isNotEmpty()) {
+            Log.i(
+                Tag,
+                "skip embedded subtitle slaves url=$streamUrl count=${embeddedSubtitleTracks.size}",
+            )
         }
         resolvedPlaybackUrl = streamUrl
         mediaPlayer.play()

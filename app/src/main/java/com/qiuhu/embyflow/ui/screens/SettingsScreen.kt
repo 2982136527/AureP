@@ -85,6 +85,7 @@ import com.qiuhu.embyflow.data.settings.AppSettings
 import com.qiuhu.embyflow.data.settings.PLAYER_MODE_COMPATIBILITY
 import com.qiuhu.embyflow.data.settings.PLAYER_MODE_STANDARD
 import com.qiuhu.embyflow.data.settings.PLAYER_MODE_SYSTEM
+import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCES
 import com.qiuhu.embyflow.model.ServerProfile
 import com.qiuhu.embyflow.model.ServerProfilesState
 import com.qiuhu.embyflow.model.ServerSnapshot
@@ -123,7 +124,8 @@ private enum class SettingsSheetKey {
     Version,
     AppUpdate,
     Player,
-    Subtitle,
+    EmbeddedSubtitle,
+    ExternalSubtitle,
     Layout,
 }
 
@@ -135,7 +137,8 @@ fun SettingsScreen(
     serverProfilesState: ServerProfilesState,
     isServerConnected: Boolean,
     onUpdatePlayerMode: (String) -> Unit,
-    onUpdateSubtitleMode: (String) -> Unit,
+    onUpdateEmbeddedSubtitleLanguage: (String) -> Unit,
+    onUpdateExternalSubtitleLanguage: (String) -> Unit,
     onUpdateLayoutMode: (String) -> Unit,
     onUpdateShowLibraryCardTitle: (Boolean) -> Unit,
     onUpdateExperimentalDualBackendRace: (Boolean) -> Unit,
@@ -307,7 +310,7 @@ fun SettingsScreen(
 
         SettingsSheetKey.Player -> SettingsSheetModel(
             title = "播放策略",
-            subtitle = "切换 Exo 直解与 VLC 兼容内核",
+            subtitle = "默认优先走 VLC，只有快速起播会先走 Exo 直解",
             options = listOf(
                 PLAYER_MODE_COMPATIBILITY,
                 PLAYER_MODE_STANDARD,
@@ -320,13 +323,24 @@ fun SettingsScreen(
             },
         )
 
-        SettingsSheetKey.Subtitle -> SettingsSheetModel(
-            title = "字幕策略",
-            subtitle = "控制字幕自动匹配优先级",
-            options = listOf("双语优先", "原语言优先", "仅外挂字幕", "关闭自动匹配"),
-            selectedOption = settings.subtitleMode,
+        SettingsSheetKey.EmbeddedSubtitle -> SettingsSheetModel(
+            title = "内嵌字幕语言",
+            subtitle = "有内嵌字幕时优先按这个语言匹配",
+            options = SUBTITLE_LANGUAGE_PREFERENCES,
+            selectedOption = settings.embeddedSubtitleLanguage,
             onSelect = {
-                onUpdateSubtitleMode(it)
+                onUpdateEmbeddedSubtitleLanguage(it)
+                activeSheet = null
+            },
+        )
+
+        SettingsSheetKey.ExternalSubtitle -> SettingsSheetModel(
+            title = "外挂字幕语言",
+            subtitle = "没有内嵌字幕时优先按这个语言匹配外挂字幕",
+            options = SUBTITLE_LANGUAGE_PREFERENCES,
+            selectedOption = settings.externalSubtitleLanguage,
+            onSelect = {
+                onUpdateExternalSubtitleLanguage(it)
                 activeSheet = null
             },
         )
@@ -439,7 +453,8 @@ fun SettingsScreen(
                     title = "播放与偏好",
                     rows = listOf(
                         SettingsRow("播放策略", settings.playerMode, Icons.Rounded.PlayArrow) { activeSheet = SettingsSheetKey.Player },
-                        SettingsRow("字幕策略", settings.subtitleMode, Icons.Rounded.Subtitles) { activeSheet = SettingsSheetKey.Subtitle },
+                        SettingsRow("内嵌字幕", settings.embeddedSubtitleLanguage, Icons.Rounded.Subtitles) { activeSheet = SettingsSheetKey.EmbeddedSubtitle },
+                        SettingsRow("外挂字幕", settings.externalSubtitleLanguage, Icons.Rounded.Subtitles) { activeSheet = SettingsSheetKey.ExternalSubtitle },
                         SettingsRow("界面风格", settings.layoutMode, Icons.Rounded.Tune) { activeSheet = SettingsSheetKey.Layout },
                     ),
                 )

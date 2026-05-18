@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.qiuhu.embyflow.model.MediaItem
 import com.qiuhu.embyflow.model.placeholderColors
+import java.util.LinkedHashMap
 import java.util.Locale
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -31,10 +32,16 @@ data class ContinueWatchingEntry(
     val primaryImageUrl: String? = null,
     val titleLogoUrl: String? = null,
     val seriesTitleLogoUrl: String? = null,
+    val seriesPrimaryImageUrl: String? = null,
+    val seriesBackdropImageUrl: String? = null,
     val backdropImageUrl: String? = null,
     val extraFanartUrls: List<String> = emptyList(),
     val seriesId: String? = null,
     val seriesName: String = "",
+    val mediaType: String = "",
+    val seasonId: String? = null,
+    val seasonNumber: Int? = null,
+    val episodeNumber: Int? = null,
     val isFolder: Boolean = false,
     val positionMs: Long,
     val durationMs: Long,
@@ -51,7 +58,7 @@ class ContinueWatchingStore(
         preferences[Keys.Entries]
             ?.let(::decodeEntries)
             .orEmpty()
-            .sortedByDescending { it.updatedAt }
+            .normalizeEntries()
     }
 
     suspend fun update(
@@ -65,10 +72,11 @@ class ContinueWatchingStore(
             val current = preferences[Keys.Entries]
                 ?.let(::decodeEntries)
                 .orEmpty()
+                .normalizeEntries()
                 .filterNot {
-                    it.id == media.id &&
-                        it.serverProfileId == serverProfileId &&
-                        it.serverUserId == serverUserId
+                    it.serverProfileId == serverProfileId &&
+                    it.serverUserId == serverUserId &&
+                        it.resumeGroupingKey() == media.resumeGroupingKey()
                 }
                 .toMutableList()
 
@@ -86,10 +94,16 @@ class ContinueWatchingStore(
                     primaryImageUrl = media.primaryImageUrl,
                     titleLogoUrl = media.titleLogoUrl,
                     seriesTitleLogoUrl = media.seriesTitleLogoUrl,
+                    seriesPrimaryImageUrl = media.seriesPrimaryImageUrl,
+                    seriesBackdropImageUrl = media.seriesBackdropImageUrl,
                     backdropImageUrl = media.backdropImageUrl,
                     extraFanartUrls = media.extraFanartUrls,
                     seriesId = media.seriesId,
                     seriesName = media.seriesName,
+                    mediaType = media.mediaType,
+                    seasonId = media.seasonId,
+                    seasonNumber = media.seasonNumber,
+                    episodeNumber = media.episodeNumber,
                     isFolder = media.isFolder,
                     positionMs = positionMs,
                     durationMs = durationMs,
@@ -99,7 +113,7 @@ class ContinueWatchingStore(
 
             preferences[Keys.Entries] = json.encodeToString(
                 current
-                    .sortedByDescending { it.updatedAt }
+                    .normalizeEntries()
                     .take(72),
             )
         }
@@ -112,6 +126,43 @@ class ContinueWatchingStore(
     private object Keys {
         val Entries = stringPreferencesKey("entries")
     }
+}
+
+private fun List<ContinueWatchingEntry>.normalizeEntries(): List<ContinueWatchingEntry> {
+    val items = LinkedHashMap<String, ContinueWatchingEntry>()
+    for (entry in sortedByDescending { it.updatedAt }) {
+        val key = entry.scopedResumeGroupingKey()
+        if (!items.containsKey(key)) {
+            items[key] = entry
+        }
+    }
+    return items.values.toList()
+}
+
+private fun ContinueWatchingEntry.scopedResumeGroupingKey(): String = buildString {
+    append(serverProfileId)
+    append('|')
+    append(serverUserId)
+    append('|')
+    append(resumeGroupingKey())
+}
+
+private fun MediaItem.resumeGroupingKey(): String = when {
+    !seriesId.isNullOrBlank() ->
+        "series:${seriesId?.takeIf { it.isNotBlank() } ?: seriesName.takeIf { it.isNotBlank() } ?: id}"
+    mediaType.equals("Episode", ignoreCase = true) ->
+        "series:${seriesName.takeIf { it.isNotBlank() } ?: id}"
+    mediaType.equals("Series", ignoreCase = true) -> "series:$id"
+    else -> "item:$id"
+}
+
+private fun ContinueWatchingEntry.resumeGroupingKey(): String = when {
+    !seriesId.isNullOrBlank() ->
+        "series:${seriesId?.takeIf { it.isNotBlank() } ?: seriesName.takeIf { it.isNotBlank() } ?: id}"
+    mediaType.equals("Episode", ignoreCase = true) ->
+        "series:${seriesName.takeIf { it.isNotBlank() } ?: id}"
+    mediaType.equals("Series", ignoreCase = true) -> "series:$id"
+    else -> "item:$id"
 }
 
 fun ContinueWatchingEntry.toMediaItem(): MediaItem = MediaItem(
@@ -127,10 +178,16 @@ fun ContinueWatchingEntry.toMediaItem(): MediaItem = MediaItem(
     primaryImageUrl = primaryImageUrl,
     titleLogoUrl = titleLogoUrl,
     seriesTitleLogoUrl = seriesTitleLogoUrl,
+    seriesPrimaryImageUrl = seriesPrimaryImageUrl,
+    seriesBackdropImageUrl = seriesBackdropImageUrl,
     backdropImageUrl = backdropImageUrl,
     extraFanartUrls = extraFanartUrls,
     seriesId = seriesId,
     seriesName = seriesName,
+    mediaType = mediaType,
+    seasonId = seasonId,
+    seasonNumber = seasonNumber,
+    episodeNumber = episodeNumber,
     isFolder = isFolder,
     resumePositionMs = positionMs,
 )
