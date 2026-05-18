@@ -1,5 +1,7 @@
 package com.qiuhu.embyflow.ui.screens
 
+import com.qiuhu.embyflow.BuildConfig
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.MutableTransitionState
@@ -68,6 +70,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.ImeAction
@@ -77,6 +80,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.AnnotatedString
+import com.qiuhu.embyflow.data.update.AppUpdateState
 import com.qiuhu.embyflow.data.settings.AppSettings
 import com.qiuhu.embyflow.data.settings.PLAYER_MODE_COMPATIBILITY
 import com.qiuhu.embyflow.data.settings.PLAYER_MODE_STANDARD
@@ -101,6 +105,8 @@ import com.qiuhu.embyflow.ui.components.FloatingNavBarSheetClearance
 import kotlinx.coroutines.delay
 
 private const val SettingsSheetExitDurationMillis = 220
+private const val AurePGitHubProfileUrl = "https://github.com/2982136527"
+private const val AurePGitHubProfileLabel = "github.com/2982136527"
 
 private object DotMaskVisualTransformation : VisualTransformation {
     override fun filter(text: AnnotatedString): TransformedText {
@@ -115,6 +121,7 @@ private enum class SettingsSheetKey {
     Server,
     Account,
     Version,
+    AppUpdate,
     Player,
     Subtitle,
     Layout,
@@ -124,6 +131,7 @@ private enum class SettingsSheetKey {
 fun SettingsScreen(
     server: ServerSnapshot,
     settings: AppSettings,
+    appUpdateState: AppUpdateState,
     serverProfilesState: ServerProfilesState,
     isServerConnected: Boolean,
     onUpdatePlayerMode: (String) -> Unit,
@@ -131,14 +139,29 @@ fun SettingsScreen(
     onUpdateLayoutMode: (String) -> Unit,
     onUpdateShowLibraryCardTitle: (Boolean) -> Unit,
     onUpdateExperimentalDualBackendRace: (Boolean) -> Unit,
+    onRefreshAppUpdate: () -> Unit,
     onSaveServerProfile: (ServerProfile) -> Unit,
     onDeleteServerProfile: (String) -> Unit,
     onActivateServerProfile: (String) -> Unit,
 ) {
+    val uriHandler = LocalUriHandler.current
     var activeSheet by rememberSaveable { mutableStateOf<SettingsSheetKey?>(null) }
     var renderedSheetModel by remember { mutableStateOf<SettingsSheetModel?>(null) }
     var serverEditorVisible by remember { mutableStateOf(false) }
     var editingServerProfile by remember { mutableStateOf<ServerProfile?>(null) }
+
+    LaunchedEffect(Unit) {
+        onRefreshAppUpdate()
+    }
+
+    BackHandler(enabled = activeSheet != null) {
+        if (serverEditorVisible) {
+            serverEditorVisible = false
+            editingServerProfile = null
+        } else {
+            activeSheet = null
+        }
+    }
 
     val activeProfile = serverProfilesState.activeProfile
     val hasConfiguredServer = activeProfile != null
@@ -181,7 +204,12 @@ fun SettingsScreen(
         hasConfiguredServer -> activeProfile!!.displayName()
         else -> "未配置"
     }
-
+    val appUpdateRowValue = when {
+        appUpdateState.isChecking -> "检查中"
+        appUpdateState.hasUpdate && !appUpdateState.latestVersion.isNullOrBlank() -> "发现 ${appUpdateState.latestVersion}"
+        !appUpdateState.errorMessage.isNullOrBlank() -> "检查失败"
+        else -> "已是最新"
+    }
     val sheetModel = when (activeSheet) {
         SettingsSheetKey.Server -> SettingsSheetModel(
             title = if (serverEditorVisible) {
@@ -257,9 +285,24 @@ fun SettingsScreen(
             subtitle = "当前客户端与服务端版本",
             details = listOf(
                 "服务端" to displayServerVersion,
-                "客户端" to "Editorial Preview",
+                "客户端" to BuildConfig.VERSION_NAME,
+                "更新状态" to appUpdateRowValue,
                 "播放策略" to settings.playerMode,
             ),
+        )
+
+        SettingsSheetKey.AppUpdate -> SettingsSheetModel(
+            title = "版本更新",
+            subtitle = "检测 AureP 是否已有新版本",
+            customContent = {
+                AppUpdateContent(
+                    state = appUpdateState,
+                    onRetry = onRefreshAppUpdate,
+                    onOpenUpdatePage = {
+                        uriHandler.openUri(appUpdateState.updatePageUrl)
+                    },
+                )
+            },
         )
 
         SettingsSheetKey.Player -> SettingsSheetModel(
@@ -386,7 +429,7 @@ fun SettingsScreen(
                             activeSheet = SettingsSheetKey.Server
                         },
                         SettingsRow("账号", displayUserName, Icons.Rounded.Person) { activeSheet = SettingsSheetKey.Account },
-                        SettingsRow("版本", displayServerVersion, Icons.Rounded.Memory) { activeSheet = SettingsSheetKey.Version },
+                        SettingsRow("服务端", displayServerVersion, Icons.Rounded.Memory) { activeSheet = SettingsSheetKey.Version },
                     ),
                 )
             }
@@ -431,6 +474,30 @@ fun SettingsScreen(
                     ),
                 )
             }
+
+            item {
+                SettingsGroup(
+                    title = "AureP",
+                    rows = listOf(
+                        SettingsRow(
+                            label = "版本更新",
+                            value = appUpdateRowValue,
+                            icon = Icons.Rounded.Memory,
+                            showBadge = appUpdateState.hasUpdate,
+                            emphasizeValue = appUpdateState.hasUpdate,
+                        ) {
+                            activeSheet = SettingsSheetKey.AppUpdate
+                        },
+                        SettingsRow(
+                            label = "GitHub 主页",
+                            value = AurePGitHubProfileLabel,
+                            icon = Icons.Rounded.Person,
+                        ) {
+                            uriHandler.openUri(AurePGitHubProfileUrl)
+                        },
+                    ),
+                )
+            }
         }
 
         SettingsSheet(
@@ -448,6 +515,8 @@ private data class SettingsRow(
     val value: String,
     val icon: ImageVector,
     val highlight: Boolean = false,
+    val showBadge: Boolean = false,
+    val emphasizeValue: Boolean = false,
     val onClick: () -> Unit,
 )
 
@@ -526,10 +595,19 @@ private fun SettingsGroup(
                                         .background(EditorialAccent),
                                 )
                             }
+                            if (row.showBadge) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFFE25555)),
+                                )
+                            }
                             Text(
                                 text = row.value,
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = EditorialTextSecondary,
+                                color = if (row.emphasizeValue) EditorialTextPrimary else EditorialTextSecondary,
+                                fontWeight = if (row.emphasizeValue) FontWeight.SemiBold else FontWeight.Normal,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
@@ -554,6 +632,101 @@ private fun SettingsGroup(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AppUpdateContent(
+    state: AppUpdateState,
+    onRetry: () -> Unit,
+    onOpenUpdatePage: () -> Unit,
+) {
+    val statusTitle = when {
+        state.isChecking -> "正在检查更新"
+        state.hasUpdate && !state.latestVersion.isNullOrBlank() -> "发现新版本 ${state.latestVersion}"
+        !state.errorMessage.isNullOrBlank() -> "暂时无法获取更新信息"
+        else -> "当前已是最新版本"
+    }
+    val statusSummary = when {
+        state.isChecking -> "正在读取 GitHub 发版信息，请稍等片刻。"
+        state.hasUpdate -> "点击下方按钮后会跳到 GitHub 对应页面，你可以在那里下载安装最新版本。"
+        !state.errorMessage.isNullOrBlank() -> state.errorMessage.orEmpty()
+        else -> "当前客户端版本 ${state.currentVersion} 已经和发版仓库同步。"
+    }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        EditorialCard(
+            shape = RoundedCornerShape(24.dp),
+            color = if (state.hasUpdate) EditorialSurfaceStrong else EditorialSurface,
+            contentPadding = PaddingValues(16.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                EditorialPill(
+                    text = if (state.hasUpdate) "有新版本" else "版本状态",
+                    color = if (state.hasUpdate) EditorialAccent.copy(alpha = 0.16f) else EditorialChip,
+                )
+                Text(
+                    text = statusTitle,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = EditorialTextPrimary,
+                    fontWeight = FontWeight.Black,
+                )
+                Text(
+                    text = statusSummary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = EditorialTextSecondary,
+                )
+                UpdateDetailRow(label = "当前版本", value = state.currentVersion)
+                UpdateDetailRow(label = "最新版本", value = state.latestVersion ?: "暂未获取")
+            }
+        }
+
+        if (state.hasUpdate) {
+            ServerActionChip(
+                modifier = Modifier.fillMaxWidth(),
+                label = "前往 GitHub 更新页",
+                icon = Icons.Rounded.ChevronRight,
+                accent = true,
+                onClick = onOpenUpdatePage,
+            )
+        } else {
+            ServerActionChip(
+                modifier = Modifier.fillMaxWidth(),
+                label = if (state.isChecking) "正在检查" else "重新检查",
+                icon = Icons.Rounded.Check,
+                enabled = !state.isChecking,
+                onClick = onRetry,
+            )
+        }
+    }
+}
+
+@Composable
+private fun UpdateDetailRow(
+    label: String,
+    value: String,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = EditorialTextSecondary,
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = EditorialTextPrimary,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

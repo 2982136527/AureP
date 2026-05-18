@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -46,6 +47,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,11 +62,16 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import coil.compose.SubcomposeAsyncImage
+import coil.compose.SubcomposeAsyncImageContent
+import coil.imageLoader
+import coil.request.ImageRequest
 import com.qiuhu.embyflow.model.cardEpisodeBadgeLabel
 import com.qiuhu.embyflow.model.MediaItem
 import com.qiuhu.embyflow.model.hasBackdropImage
@@ -85,6 +92,7 @@ private val TodayAction = Color(0xFFF4EEE5)
 private const val TodayHighlightsAutoScrollResumeDelayMillis = 2200L
 private const val TodayHighlightsAutoScrollPollingMillis = 120L
 private val TodayHighlightsAutoScrollSpeed = 18.dp
+private const val TodayHeroPrefetchCount = 6
 
 @Composable
 fun HomeScreen(
@@ -119,6 +127,11 @@ fun HomeScreen(
         isCompactLayout -> 0.72f
         isLargeLayout -> 1f
         else -> 0.9f
+    }
+    val heroCardHeight = when {
+        isCompactLayout -> 200.dp
+        isLargeLayout -> 276.dp
+        else -> 236.dp
     }
     val resumeCardWidth = when {
         isCompactLayout -> 236.dp
@@ -183,6 +196,7 @@ fun HomeScreen(
                     TodayHeroCarousel(
                         items = heroRotationPool,
                         cardWidthFraction = heroWidthFraction,
+                        cardHeight = heroCardHeight,
                         onOpenMedia = onOpenMedia,
                     )
                 }
@@ -227,6 +241,8 @@ fun HomeScreen(
                                     media = item,
                                     modifier = Modifier.width(resumeCardWidth),
                                     height = resumeCardHeight,
+                                    transparentFooter = true,
+                                    preferTitleLogo = true,
                                     onClick = { onOpenMedia(item) },
                                 )
                             }
@@ -433,83 +449,140 @@ private fun TodayPosterFeatureCard(
 private fun TodayHeroCarousel(
     items: List<MediaItem>,
     cardWidthFraction: Float,
+    cardHeight: Dp,
     onOpenMedia: (MediaItem) -> Unit,
 ) {
     if (items.isEmpty()) return
 
-    var activeItem by remember(items) {
-        mutableStateOf(items.random())
+    val context = LocalContext.current
+    val imageLoader = context.imageLoader
+    val density = LocalDensity.current
+    var rotationOrder by remember(items) {
+        mutableStateOf(items.shuffledForHeroRotation())
     }
+    var activeIndex by remember(items) {
+        mutableIntStateOf(0)
+    }
+    var warmedHeroUrls by remember(items) { mutableStateOf(setOf<String>()) }
+    val activeItem = rotationOrder.getOrElse(activeIndex) { items.first() }
 
     LaunchedEffect(items) {
-        activeItem = items.random()
+        rotationOrder = items.shuffledForHeroRotation()
+        activeIndex = 0
         while (true) {
             delay(4800)
-            activeItem = items.pickNextRandom(previousId = activeItem.id)
+            if (rotationOrder.size <= 1) continue
+
+            val nextIndex = activeIndex + 1
+            if (nextIndex < rotationOrder.size) {
+                activeIndex = nextIndex
+            } else {
+                val previousItemId = rotationOrder
+                    .getOrNull(activeIndex)
+                    ?.id
+                    ?: items.firstOrNull()?.id
+                rotationOrder = items.shuffledForHeroRotation(previousId = previousItemId)
+                activeIndex = 0
+            }
         }
     }
 
-    AnimatedContent(
-        targetState = activeItem,
-        transitionSpec = {
-            (
-                fadeIn(
-                    animationSpec = tween(
-                        durationMillis = 650,
-                        easing = FastOutSlowInEasing,
-                    ),
-                ) +
-                    slideInHorizontally(
-                        animationSpec = tween(
-                            durationMillis = 650,
-                            easing = FastOutSlowInEasing,
-                        ),
-                        initialOffsetX = { it / 16 },
-                    ) +
-                    scaleIn(
-                        animationSpec = tween(
-                            durationMillis = 650,
-                            easing = FastOutSlowInEasing,
-                        ),
-                        initialScale = 0.985f,
-                    )
-                ) togetherWith (
-                fadeOut(
-                    animationSpec = tween(
-                        durationMillis = 520,
-                        easing = FastOutSlowInEasing,
-                    ),
-                ) +
-                    slideOutHorizontally(
-                        animationSpec = tween(
-                            durationMillis = 520,
-                            easing = FastOutSlowInEasing,
-                        ),
-                        targetOffsetX = { -it / 18 },
-                    ) +
-                    scaleOut(
-                        animationSpec = tween(
-                            durationMillis = 520,
-                            easing = FastOutSlowInEasing,
-                        ),
-                        targetScale = 1.015f,
-                    )
+    BoxWithConstraints(
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        val targetWidthPx = with(density) { (maxWidth * cardWidthFraction).roundToPx().coerceAtLeast(1) }
+        val targetHeightPx = with(density) { cardHeight.roundToPx().coerceAtLeast(1) }
+
+        LaunchedEffect(rotationOrder, activeIndex, targetWidthPx, targetHeightPx) {
+            val upcomingUrls = buildList {
+                val limit = minOf(TodayHeroPrefetchCount, rotationOrder.size)
+                repeat(limit) { offset ->
+                    val media = rotationOrder.getOrNull((activeIndex + offset) % rotationOrder.size)
+                    val imageUrl = media?.backdropImageUrl ?: media?.primaryImageUrl
+                    if (!imageUrl.isNullOrBlank()) {
+                        add(imageUrl)
+                    }
+                }
+            }.filterNot { warmedHeroUrls.contains(it) }
+
+            if (upcomingUrls.isEmpty()) return@LaunchedEffect
+
+            upcomingUrls.forEach { imageUrl ->
+                imageLoader.enqueue(
+                    ImageRequest.Builder(context)
+                        .data(imageUrl)
+                        .size(targetWidthPx, targetHeightPx)
+                        .memoryCacheKey(imageUrl)
+                        .diskCacheKey(imageUrl)
+                        .build(),
                 )
-        },
-        label = "today-hero-rotation",
-    ) { item ->
-        Box(
-            modifier = Modifier.fillMaxWidth(),
-            contentAlignment = Alignment.Center,
-        ) {
-            TodayFeatureCard(
-                media = item,
-                modifier = Modifier.fillMaxWidth(cardWidthFraction),
-                height = 0.dp,
-                imageContentScale = ContentScale.Fit,
-                adaptCardToImage = true,
-                onClick = { onOpenMedia(item) },
-            )
+            }
+            warmedHeroUrls = warmedHeroUrls + upcomingUrls
+        }
+
+        AnimatedContent(
+            targetState = activeItem,
+            transitionSpec = {
+                (
+                    fadeIn(
+                        animationSpec = tween(
+                            durationMillis = 650,
+                            easing = FastOutSlowInEasing,
+                        ),
+                    ) +
+                        slideInHorizontally(
+                            animationSpec = tween(
+                                durationMillis = 650,
+                                easing = FastOutSlowInEasing,
+                            ),
+                            initialOffsetX = { it / 16 },
+                        ) +
+                        scaleIn(
+                            animationSpec = tween(
+                                durationMillis = 650,
+                                easing = FastOutSlowInEasing,
+                            ),
+                            initialScale = 0.985f,
+                        )
+                    ) togetherWith (
+                    fadeOut(
+                        animationSpec = tween(
+                            durationMillis = 520,
+                            easing = FastOutSlowInEasing,
+                        ),
+                    ) +
+                        slideOutHorizontally(
+                            animationSpec = tween(
+                                durationMillis = 520,
+                                easing = FastOutSlowInEasing,
+                            ),
+                            targetOffsetX = { -it / 18 },
+                        ) +
+                        scaleOut(
+                            animationSpec = tween(
+                                durationMillis = 520,
+                                easing = FastOutSlowInEasing,
+                            ),
+                            targetScale = 1.015f,
+                        )
+                    )
+            },
+            label = "today-hero-rotation",
+        ) { item ->
+            Box(
+                modifier = Modifier.fillMaxWidth(),
+                contentAlignment = Alignment.Center,
+            ) {
+                TodayFeatureCard(
+                    media = item,
+                    modifier = Modifier.fillMaxWidth(cardWidthFraction),
+                    height = cardHeight,
+                    imageContentScale = ContentScale.Crop,
+                    transparentFooter = true,
+                    preferTitleLogo = true,
+                    onClick = { onOpenMedia(item) },
+                )
+            }
         }
     }
 }
@@ -624,6 +697,8 @@ private fun TodayFeatureCard(
     height: Dp,
     imageContentScale: ContentScale = ContentScale.Crop,
     adaptCardToImage: Boolean = false,
+    transparentFooter: Boolean = false,
+    preferTitleLogo: Boolean = false,
     onClick: () -> Unit,
 ) {
     val shape = RoundedCornerShape(16.dp)
@@ -694,7 +769,11 @@ private fun TodayFeatureCard(
                 .padding(horizontal = 18.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.Bottom,
         ) {
-            TodayCardFooter(media = media)
+            TodayCardFooter(
+                media = media,
+                transparent = transparentFooter,
+                preferTitleLogo = preferTitleLogo,
+            )
         }
     }
 }
@@ -703,27 +782,33 @@ private fun TodayFeatureCard(
 private fun TodayCardFooter(
     media: MediaItem,
     compact: Boolean = false,
+    transparent: Boolean = false,
+    preferTitleLogo: Boolean = false,
 ) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(if (compact) 14.dp else 16.dp))
-            .background(if (compact) Color(0x66FFFFFF) else Color(0x73FFFFFF))
+            .then(
+                if (transparent) {
+                    Modifier
+                } else {
+                    Modifier
+                        .clip(RoundedCornerShape(if (compact) 14.dp else 16.dp))
+                        .background(if (compact) Color(0x66FFFFFF) else Color(0x73FFFFFF))
+                }
+            )
             .padding(
-                horizontal = if (compact) 12.dp else 14.dp,
-                vertical = if (compact) 7.dp else 8.dp,
+                horizontal = if (transparent) 0.dp else if (compact) 12.dp else 14.dp,
+                vertical = if (transparent) 0.dp else if (compact) 7.dp else 8.dp,
             ),
     ) {
         Column(
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            Text(
-                text = media.title,
-                style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
-                color = Color.White,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+            TodayCardTitle(
+                media = media,
+                compact = compact,
+                preferTitleLogo = preferTitleLogo,
             )
             Text(
                 text = media.subtitle.ifBlank { media.meta },
@@ -734,6 +819,50 @@ private fun TodayCardFooter(
             )
         }
     }
+}
+
+@Composable
+private fun TodayCardTitle(
+    media: MediaItem,
+    compact: Boolean = false,
+    preferTitleLogo: Boolean = false,
+) {
+    if (preferTitleLogo && media.titleLogoUrl != null) {
+        SubcomposeAsyncImage(
+            model = media.titleLogoUrl,
+            contentDescription = media.title,
+            modifier = Modifier
+                .fillMaxWidth(if (compact) 0.74f else 0.82f)
+                .heightIn(
+                    min = if (compact) 24.dp else 28.dp,
+                    max = if (compact) 30.dp else 38.dp,
+                ),
+            contentScale = ContentScale.Fit,
+            alignment = Alignment.CenterStart,
+            loading = {},
+            success = { SubcomposeAsyncImageContent() },
+            error = {
+                Text(
+                    text = media.title,
+                    style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            },
+        )
+        return
+    }
+
+    Text(
+        text = media.title,
+        style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
+        color = Color.White,
+        fontWeight = FontWeight.SemiBold,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
 }
 
 @Composable
@@ -873,4 +1002,20 @@ private fun List<MediaItem>.pickNextRandom(
     if (size <= 1) return first()
     val candidates = filterNot { it.id == previousId }
     return if (candidates.isNotEmpty()) candidates.random() else random()
+}
+
+private fun List<MediaItem>.shuffledForHeroRotation(
+    previousId: String? = null,
+): List<MediaItem> {
+    if (size <= 1) return this
+    val shuffled = shuffled().toMutableList()
+    if (previousId == null) {
+        return shuffled
+    }
+    val firstCandidateIndex = shuffled.indexOfFirst { it.id != previousId }
+    if (firstCandidateIndex > 0) {
+        val firstCandidate = shuffled.removeAt(firstCandidateIndex)
+        shuffled.add(0, firstCandidate)
+    }
+    return shuffled
 }

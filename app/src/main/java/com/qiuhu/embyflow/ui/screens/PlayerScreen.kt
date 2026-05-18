@@ -14,6 +14,7 @@ import android.provider.Settings
 import android.util.Log
 import android.view.ViewGroup
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -827,6 +828,29 @@ fun PlayerScreen(
             showSubtitleSheet = false
         }
         revealControls()
+    }
+
+    BackHandler {
+        when {
+            controlsLocked -> {
+                controlsLocked = false
+                revealControls()
+            }
+
+            showTrackSheet || showRuntimeSheet || showSubtitleSheet -> {
+                showTrackSheet = false
+                showRuntimeSheet = false
+                showSubtitleSheet = false
+                revealControls()
+            }
+
+            else -> {
+                onClose(
+                    currentPositionSnapshot(),
+                    durationSnapshot(),
+                )
+            }
+        }
     }
 
     fun attemptAutoFallback(trigger: String): Boolean {

@@ -22,10 +22,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -97,10 +97,14 @@ fun LibraryScreen(
     isAppending: Boolean,
     isServerConnected: Boolean,
     hasConfiguredServer: Boolean,
+    gridState: LazyGridState,
+    restoredScrollIndex: Int,
+    restoredScrollOffset: Int,
     onSelectLibrary: (String) -> Unit,
     onLoadMore: () -> Unit,
     onSelectLibrarySortMode: (String) -> Unit,
     onOpenMedia: (MediaItem) -> Unit,
+    onGridScrollChanged: (index: Int, offset: Int) -> Unit,
 ) {
     val isCompactLayout = layoutMode == "紧凑信息流"
     val isLargeLayout = layoutMode == "大图优先"
@@ -121,12 +125,54 @@ fun LibraryScreen(
     val context = LocalContext.current
     val density = LocalDensity.current
     val imageLoader = context.imageLoader
-    val gridState = rememberLazyGridState()
     val hasMoreLibraryItems = libraryItems.size < libraryTotalCount
     val loadMoreThreshold = columnCount * 6
     val posterAspectRatio = LibraryPosterAspectRatio
     val gridHorizontalSpacingPx = with(density) { gridHorizontalSpacing.roundToPx() }
     var warmedImageUrls by remember(selectedLibraryId) { mutableStateOf(setOf<String>()) }
+    val totalGridItems = when {
+        !isServerConnected -> 1
+        else -> {
+            var count = 1 // sort row
+            if (libraries.isNotEmpty()) {
+                count += 2 // selector row + divider
+            }
+            count += if (libraryItems.isEmpty()) 1 else libraryItems.size
+            if (isAppending) {
+                count += 1
+            }
+            count
+        }
+    }
+
+    LaunchedEffect(
+        selectedLibraryId,
+        restoredScrollIndex,
+        restoredScrollOffset,
+        totalGridItems,
+    ) {
+        if (selectedLibraryId.isNullOrBlank()) return@LaunchedEffect
+        if (totalGridItems <= 0) {
+            return@LaunchedEffect
+        }
+        val targetIndex = restoredScrollIndex.coerceIn(0, totalGridItems - 1)
+        gridState.scrollToItem(targetIndex, restoredScrollOffset.coerceAtLeast(0))
+    }
+
+    LaunchedEffect(
+        gridState,
+        selectedLibraryId,
+    ) {
+        if (selectedLibraryId.isNullOrBlank()) return@LaunchedEffect
+
+        snapshotFlow {
+            gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset
+        }
+            .distinctUntilChanged()
+            .collect { (index, offset) ->
+                onGridScrollChanged(index, offset)
+            }
+    }
 
     LaunchedEffect(
         gridState,

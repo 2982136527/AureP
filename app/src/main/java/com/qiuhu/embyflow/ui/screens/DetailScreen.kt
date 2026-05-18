@@ -1,5 +1,6 @@
 package com.qiuhu.embyflow.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -92,6 +93,9 @@ fun DetailScreen(
     onPlayEpisode: (MediaItem) -> Unit,
 ) {
     var summaryDialogVisible by rememberSaveable { mutableStateOf(false) }
+    BackHandler(enabled = summaryDialogVisible) {
+        summaryDialogVisible = false
+    }
     val playTarget = if (media.isSeries) seriesDetail?.nextUpEpisode ?: media else media
     val playButtonLabel = when {
         media.isSeries && seriesDetail?.nextUpEpisode != null -> "继续播放 ${seriesDetail.nextUpEpisode.seasonEpisodeLabel().ifBlank { "下一集" }}"
@@ -421,7 +425,7 @@ private fun DetailActorCard(
                     style = MaterialTheme.typography.titleSmall,
                     color = EditorialTextPrimary,
                     fontWeight = FontWeight.Bold,
-                    maxLines = 2,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     textAlign = TextAlign.Center,
                 )

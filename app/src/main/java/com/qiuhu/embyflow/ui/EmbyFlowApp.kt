@@ -2,6 +2,7 @@ package com.qiuhu.embyflow.ui
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Home
@@ -26,6 +28,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -64,6 +67,11 @@ private enum class RootTab {
     Settings,
 }
 
+private data class LibraryScrollSnapshot(
+    val index: Int = 0,
+    val offset: Int = 0,
+)
+
 private const val ErrorToastDurationMillis = 1800L
 
 @Composable
@@ -84,6 +92,9 @@ fun EmbyFlowApp(
         val seriesDetails by embyViewModel.seriesDetails.collectAsStateWithLifecycle()
         val searchState by embyViewModel.searchState.collectAsStateWithLifecycle()
         val serverProfilesState by embyViewModel.serverProfilesState.collectAsStateWithLifecycle()
+        val appUpdateState by embyViewModel.appUpdateState.collectAsStateWithLifecycle()
+        val libraryGridState = rememberLazyGridState()
+        val libraryScrollSnapshots = remember { mutableStateMapOf<String, LibraryScrollSnapshot>() }
         val payload = currentPayload(uiState)
         val isServerConnected = uiState is EmbyUiState.Ready
         val hasConfiguredServer = serverProfilesState.activeProfile != null
@@ -117,6 +128,29 @@ fun EmbyFlowApp(
             }
         }
 
+        val currentRootTab = RootTab.valueOf(currentTab)
+
+        BackHandler(
+            enabled = playbackState !is PlaybackUiState.Idle ||
+                searchVisible ||
+                selectedMedia != null ||
+                tagBrowseState.activeTag != null ||
+                actorBrowseState.activeActor != null ||
+                currentRootTab != RootTab.Home,
+        ) {
+            when {
+                playbackState !is PlaybackUiState.Idle -> embyViewModel.closePlayer()
+                searchVisible -> {
+                    searchVisible = false
+                    embyViewModel.clearSearch()
+                }
+                selectedMedia != null -> closeMediaDetail()
+                actorBrowseState.activeActor != null -> embyViewModel.closeActorBrowse()
+                tagBrowseState.activeTag != null -> embyViewModel.closeTagBrowse()
+                currentRootTab != RootTab.Home -> currentTab = RootTab.Home.name
+            }
+        }
+
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -144,9 +178,11 @@ fun EmbyFlowApp(
                 is PlaybackUiState.Error -> RootScaffold(
                     payload = payload,
                     settings = settings,
-                    currentTab = RootTab.valueOf(currentTab),
+                    currentTab = currentRootTab,
                     isRefreshingLibrary = false,
                     isAppendingLibrary = false,
+                    libraryGridState = libraryGridState,
+                    libraryScrollSnapshots = libraryScrollSnapshots,
                     errorMessage = player.message,
                     onRetry = embyViewModel::closePlayer,
                     onTabSelected = { currentTab = it.name },
@@ -160,6 +196,8 @@ fun EmbyFlowApp(
                     onUpdateShowLibraryCardTitle = embyViewModel::updateShowLibraryCardTitle,
                     onUpdateExperimentalDualBackendRace = embyViewModel::updateExperimentalDualBackendRace,
                     onUpdateLibrarySortMode = embyViewModel::updateLibrarySortMode,
+                    appUpdateState = appUpdateState,
+                    onRefreshAppUpdate = embyViewModel::refreshAppUpdateStatus,
                     serverProfilesState = serverProfilesState,
                     onSaveServerProfile = embyViewModel::saveServerProfile,
                     onDeleteServerProfile = embyViewModel::deleteServerProfile,
@@ -225,9 +263,11 @@ fun EmbyFlowApp(
                             is EmbyUiState.Error -> RootScaffold(
                                 payload = state.fallback,
                                 settings = settings,
-                                currentTab = RootTab.valueOf(currentTab),
+                                currentTab = currentRootTab,
                                 isRefreshingLibrary = false,
                                 isAppendingLibrary = false,
+                                libraryGridState = libraryGridState,
+                                libraryScrollSnapshots = libraryScrollSnapshots,
                                 errorMessage = state.detail,
                                 onRetry = embyViewModel::refresh,
                                 onTabSelected = { currentTab = it.name },
@@ -241,6 +281,8 @@ fun EmbyFlowApp(
                                 onUpdateShowLibraryCardTitle = embyViewModel::updateShowLibraryCardTitle,
                                 onUpdateExperimentalDualBackendRace = embyViewModel::updateExperimentalDualBackendRace,
                                 onUpdateLibrarySortMode = embyViewModel::updateLibrarySortMode,
+                                appUpdateState = appUpdateState,
+                                onRefreshAppUpdate = embyViewModel::refreshAppUpdateStatus,
                                 serverProfilesState = serverProfilesState,
                                 onSaveServerProfile = embyViewModel::saveServerProfile,
                                 onDeleteServerProfile = embyViewModel::deleteServerProfile,
@@ -256,9 +298,11 @@ fun EmbyFlowApp(
                             is EmbyUiState.Ready -> RootScaffold(
                                 payload = state.payload,
                                 settings = settings,
-                                currentTab = RootTab.valueOf(currentTab),
+                                currentTab = currentRootTab,
                                 isRefreshingLibrary = state.isRefreshingLibrary,
                                 isAppendingLibrary = state.isAppendingLibrary,
+                                libraryGridState = libraryGridState,
+                                libraryScrollSnapshots = libraryScrollSnapshots,
                                 errorMessage = null,
                                 onRetry = embyViewModel::refresh,
                                 onTabSelected = { currentTab = it.name },
@@ -272,6 +316,8 @@ fun EmbyFlowApp(
                                 onUpdateShowLibraryCardTitle = embyViewModel::updateShowLibraryCardTitle,
                                 onUpdateExperimentalDualBackendRace = embyViewModel::updateExperimentalDualBackendRace,
                                 onUpdateLibrarySortMode = embyViewModel::updateLibrarySortMode,
+                                appUpdateState = appUpdateState,
+                                onRefreshAppUpdate = embyViewModel::refreshAppUpdateStatus,
                                 serverProfilesState = serverProfilesState,
                                 onSaveServerProfile = embyViewModel::saveServerProfile,
                                 onDeleteServerProfile = embyViewModel::deleteServerProfile,
@@ -322,6 +368,8 @@ private fun RootScaffold(
     currentTab: RootTab,
     isRefreshingLibrary: Boolean,
     isAppendingLibrary: Boolean = false,
+    libraryGridState: androidx.compose.foundation.lazy.grid.LazyGridState,
+    libraryScrollSnapshots: MutableMap<String, LibraryScrollSnapshot>,
     errorMessage: String?,
     onRetry: () -> Unit,
     onTabSelected: (RootTab) -> Unit,
@@ -335,6 +383,8 @@ private fun RootScaffold(
     onUpdateShowLibraryCardTitle: (Boolean) -> Unit,
     onUpdateExperimentalDualBackendRace: (Boolean) -> Unit,
     onUpdateLibrarySortMode: (String) -> Unit,
+    appUpdateState: com.qiuhu.embyflow.data.update.AppUpdateState,
+    onRefreshAppUpdate: () -> Unit,
     serverProfilesState: com.qiuhu.embyflow.model.ServerProfilesState,
     onSaveServerProfile: (com.qiuhu.embyflow.model.ServerProfile) -> Unit,
     onDeleteServerProfile: (String) -> Unit,
@@ -397,21 +447,38 @@ private fun RootScaffold(
                 isAppending = isAppendingLibrary,
                 isServerConnected = isServerConnected,
                 hasConfiguredServer = hasConfiguredServer,
+                gridState = libraryGridState,
+                restoredScrollIndex = payload.selectedLibraryId
+                    ?.let { libraryScrollSnapshots[it]?.index }
+                    ?: 0,
+                restoredScrollOffset = payload.selectedLibraryId
+                    ?.let { libraryScrollSnapshots[it]?.offset }
+                    ?: 0,
                 onSelectLibrary = onSelectLibrary,
                 onLoadMore = onLoadMoreLibrary,
                 onSelectLibrarySortMode = onUpdateLibrarySortMode,
                 onOpenMedia = onOpenMedia,
+                onGridScrollChanged = { index, offset ->
+                    payload.selectedLibraryId?.let { libraryId ->
+                        libraryScrollSnapshots[libraryId] = LibraryScrollSnapshot(
+                            index = index,
+                            offset = offset,
+                        )
+                    }
+                },
             )
 
             RootTab.Settings -> SettingsScreen(
                 server = payload.server,
                 settings = settings,
+                appUpdateState = appUpdateState,
                 serverProfilesState = serverProfilesState,
                 onUpdatePlayerMode = onUpdatePlayerMode,
                 onUpdateSubtitleMode = onUpdateSubtitleMode,
                 onUpdateLayoutMode = onUpdateLayoutMode,
                 onUpdateShowLibraryCardTitle = onUpdateShowLibraryCardTitle,
                 onUpdateExperimentalDualBackendRace = onUpdateExperimentalDualBackendRace,
+                onRefreshAppUpdate = onRefreshAppUpdate,
                 onSaveServerProfile = onSaveServerProfile,
                 onDeleteServerProfile = onDeleteServerProfile,
                 onActivateServerProfile = onActivateServerProfile,

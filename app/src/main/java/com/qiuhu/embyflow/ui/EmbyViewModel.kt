@@ -11,6 +11,8 @@ import com.qiuhu.embyflow.data.emby.EmbyPlaybackSessionState
 import com.qiuhu.embyflow.data.emby.EmbyPlaybackSource
 import com.qiuhu.embyflow.data.emby.EmbyRepository
 import com.qiuhu.embyflow.data.emby.EmbySession
+import com.qiuhu.embyflow.data.update.AppUpdateRepository
+import com.qiuhu.embyflow.data.update.AppUpdateState
 import com.qiuhu.embyflow.data.resume.ContinueWatchingEntry
 import com.qiuhu.embyflow.data.resume.ContinueWatchingStore
 import com.qiuhu.embyflow.data.resume.toMediaItem
@@ -114,6 +116,7 @@ class EmbyViewModel(
     application: Application,
 ) : AndroidViewModel(application) {
     private var repository: EmbyRepository? = null
+    private val appUpdateRepository = AppUpdateRepository()
     private val settingsStore = AppSettingsStore(application.applicationContext)
     private val continueWatchingStore = ContinueWatchingStore(application.applicationContext)
     private val searchHistoryStore = SearchHistoryStore(application.applicationContext)
@@ -157,11 +160,19 @@ class EmbyViewModel(
     private val _serverProfilesState = MutableStateFlow(ServerProfilesState())
     val serverProfilesState: StateFlow<ServerProfilesState> = _serverProfilesState.asStateFlow()
 
+    private val _appUpdateState = MutableStateFlow(
+        AppUpdateState(
+            currentVersion = BuildConfig.VERSION_NAME,
+        ),
+    )
+    val appUpdateState: StateFlow<AppUpdateState> = _appUpdateState.asStateFlow()
+
     init {
         observeSettings()
         observeContinueWatching()
         observeSearchHistory()
         observeServerProfiles()
+        refreshAppUpdateStatus()
         bootstrap()
     }
 
@@ -395,6 +406,37 @@ class EmbyViewModel(
 
         viewModelScope.launch {
             settingsStore.updateExperimentalDualBackendRace(value)
+        }
+    }
+
+    fun refreshAppUpdateStatus() {
+        if (_appUpdateState.value.isChecking) {
+            return
+        }
+
+        viewModelScope.launch {
+            val previousState = _appUpdateState.value
+            _appUpdateState.value = previousState.copy(
+                currentVersion = BuildConfig.VERSION_NAME,
+                isChecking = true,
+                errorMessage = null,
+            )
+
+            runCatching {
+                appUpdateRepository.checkForUpdate(BuildConfig.VERSION_NAME)
+            }.onSuccess { state ->
+                _appUpdateState.value = state
+            }.onFailure { throwable ->
+                _appUpdateState.value = AppUpdateState(
+                    currentVersion = BuildConfig.VERSION_NAME,
+                    latestVersion = previousState.latestVersion,
+                    hasUpdate = previousState.hasUpdate,
+                    updatePageUrl = previousState.updatePageUrl,
+                    downloadUrl = previousState.downloadUrl,
+                    isChecking = false,
+                    errorMessage = throwable.message ?: "暂时无法检查更新",
+                )
+            }
         }
     }
 
