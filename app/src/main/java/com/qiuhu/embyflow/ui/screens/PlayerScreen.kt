@@ -101,6 +101,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.layout.ContentScale
+import coil.compose.AsyncImage
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -131,6 +133,8 @@ import com.qiuhu.embyflow.data.settings.AppSettings
 import com.qiuhu.embyflow.data.settings.PLAYER_MODE_COMPATIBILITY
 import com.qiuhu.embyflow.data.settings.PLAYER_MODE_STANDARD
 import com.qiuhu.embyflow.data.settings.PLAYER_MODE_SYSTEM
+import com.qiuhu.embyflow.model.MediaItem
+import com.qiuhu.embyflow.model.isEpisode
 import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_CHINESE
 import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_ENGLISH
 import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_FOLLOW_DEFAULT
@@ -138,6 +142,7 @@ import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_JAPANESE
 import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_KOREAN
 import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_SIMPLIFIED_CHINESE
 import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_TRADITIONAL_CHINESE
+import com.qiuhu.embyflow.ui.theme.AppTitleFontFamily
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
@@ -145,15 +150,40 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.util.concurrent.TimeUnit
 
 private val PlayerAccentColor = Color(0xFFF0E7DA)
 private val PlayerPanelColor = Color(0xCC101010)
 private const val PlayerDebugTag = "AurePPlayer"
 
+private sealed interface RedirectProbeState {
+    data object Idle : RedirectProbeState
+    data object Loading : RedirectProbeState
+    data class Hit(
+        val code: Int,
+        val location: String,
+    ) : RedirectProbeState
+
+    data class NoRedirect(
+        val code: Int,
+    ) : RedirectProbeState
+
+    data class Skipped(
+        val reason: String,
+    ) : RedirectProbeState
+
+    data class Failed(
+        val message: String,
+    ) : RedirectProbeState
+}
+
 @Composable
 fun PlayerScreen(
+    media: MediaItem,
     mediaId: String,
     title: String,
     source: EmbyPlaybackSource,
@@ -173,6 +203,30 @@ fun PlayerScreen(
         with(density) { WindowInsets.navigationBars.getRight(this, layoutDirection).toDp() }
     } else {
         0.dp
+    }
+    val headerLogoUrl = remember(media) {
+        if (media.isEpisode) {
+            media.seriesTitleLogoUrl?.takeIf { it.isNotBlank() }
+                ?: media.titleLogoUrl?.takeIf { it.isNotBlank() }
+        } else {
+            media.titleLogoUrl?.takeIf { it.isNotBlank() }
+        }
+    }
+    val headerTitle = remember(media, title) {
+        when {
+            media.isEpisode -> media.seriesName.ifBlank { title }
+            media.title.isNotBlank() -> media.title
+            else -> title
+        }
+    }
+    val episodeTitle = remember(media, title) {
+        if (!media.isEpisode) {
+            null
+        } else {
+            media.title
+                .takeIf { it.isNotBlank() && it != media.seriesName }
+                ?: title.takeIf { it.isNotBlank() && it != media.seriesName }
+        }
     }
     val runtimeProfile = remember(settings.playerMode) {
         settings.toPlayerRuntimeProfile()
@@ -302,6 +356,9 @@ fun PlayerScreen(
     val activeStreamOption = remember(streamOptions, selectedStreamOptionId) {
         streamOptions.firstOrNull { it.id == selectedStreamOptionId } ?: streamOptions.first()
     }
+    var redirectProbeState by remember(activeStreamOption.id, activeStreamOption.streamUrl) {
+        mutableStateOf<RedirectProbeState>(RedirectProbeState.Idle)
+    }
     var hasRenderedFirstFrame by remember(activeStreamOption.id) {
         mutableStateOf(false)
     }
@@ -414,6 +471,12 @@ fun PlayerScreen(
     }
     val activeBackendKind = remember(activeBackendKindName) {
         PlayerBackendKind.valueOf(activeBackendKindName)
+    }
+    val activeBackendLabel = remember(activeBackendKind) {
+        when (activeBackendKind) {
+            PlayerBackendKind.Exo -> "Exo"
+            PlayerBackendKind.Vlc -> "VLC"
+        }
     }
     val raceInProgress = experimentalDualBackendRace && !raceResolved
     val vlcForceSoftwareDecode = remember(
@@ -1122,6 +1185,7 @@ fun PlayerScreen(
         autoFallbackInProgress = false
         hasRenderedFirstFrame = false
         bitrateEstimateBitsPerSecond = 0L
+        redirectProbeState = RedirectProbeState.Idle
         resolvedPlaybackUrl = activeStreamOption.streamUrl
         compatibilityPlaybackUrl = null
         activeBackendKindName = preferredBackendKind.name
@@ -1131,6 +1195,19 @@ fun PlayerScreen(
         Log.i(
             PlayerDebugTag,
             "starting title=$title mediaId=$mediaId option=${activeStreamOption.id} entry=${activeStreamOption.streamUrl}",
+        )
+    }
+
+    LaunchedEffect(activeStreamOption.id, activeStreamOption.streamUrl, activeStreamOption.requestHeaders) {
+        val streamUrl = activeStreamOption.streamUrl.trim()
+        if (!shouldProbeRedirectState(activeStreamOption.id, streamUrl)) {
+            redirectProbeState = RedirectProbeState.Skipped("当前链路不是 302 入口")
+            return@LaunchedEffect
+        }
+        redirectProbeState = RedirectProbeState.Loading
+        redirectProbeState = probeRedirectState(
+            url = streamUrl,
+            requestHeaders = activeStreamOption.requestHeaders,
         )
     }
 
@@ -1558,7 +1635,7 @@ fun PlayerScreen(
         ) {
             PlayerLoadingOverlay(
                 label = "正在缓冲",
-                detail = formatBitrate(bitrateEstimateBitsPerSecond)?.let { "实时码率 $it" },
+                detail = formatBitrate(bitrateEstimateBitsPerSecond),
             )
         }
 
@@ -1589,23 +1666,25 @@ fun PlayerScreen(
                 exit = fadeOut(),
             ) {
                 Box(modifier = Modifier.fillMaxSize()) {
-                    PlayerTopActions(
+                    PlayerTopBar(
                         modifier = Modifier
                             .align(Alignment.TopStart)
+                            .fillMaxWidth()
                             .statusBarsPadding()
-                            .padding(horizontal = 18.dp, vertical = 14.dp),
+                            .padding(
+                                start = 18.dp,
+                                top = 14.dp,
+                                end = 18.dp + landscapeNavBarRightPadding,
+                                bottom = 14.dp,
+                            ),
+                        title = headerTitle,
+                        titleLogoUrl = headerLogoUrl,
+                        compact = isLandscapeFullscreen || isLandscapeLayout,
                         onClose = {
                             onClose(
                                 currentPositionSnapshot(),
                                 durationSnapshot(),
                             )
-                        },
-                        onToggleLock = {
-                            controlsLocked = true
-                            controlsVisible = false
-                            showTrackSheet = false
-                            showRuntimeSheet = false
-                            showSubtitleSheet = false
                         },
                     )
 
@@ -1616,6 +1695,13 @@ fun PlayerScreen(
                         subtitleChoiceLabel = subtitleChoiceLabel,
                         playbackSpeed = playbackSpeed,
                         isLandscapeFullscreen = isLandscapeFullscreen,
+                        onToggleLock = {
+                            controlsLocked = true
+                            controlsVisible = false
+                            showTrackSheet = false
+                            showRuntimeSheet = false
+                            showSubtitleSheet = false
+                        },
                         onToggleSubtitleSheet = {
                             showTrackSheet = false
                             showRuntimeSheet = false
@@ -1675,13 +1761,16 @@ fun PlayerScreen(
                                 title = title,
                                 subtitleChoiceLabel = subtitleChoiceLabel,
                                 runtimeLabel = runtimeProfile.label,
+                                backendLabel = activeBackendLabel,
                                 streamChoiceLabel = streamChoiceLabel,
                                 bitrateLabel = formatBitrate(bitrateEstimateBitsPerSecond),
+                                redirectProbeState = redirectProbeState,
                                 infoFields = source.infoFields,
                             )
 
                             showRuntimeSheet -> PlayerRuntimeSheet(
                                 runtimeLabel = runtimeProfile.label,
+                                backendLabel = activeBackendLabel,
                                 streamOptions = streamOptions,
                                 selectedStreamOptionId = activeStreamOption.id,
                                 onSelectStreamOption = { optionId ->
@@ -1692,10 +1781,31 @@ fun PlayerScreen(
                                     revealControls()
                                 },
                                 bitrateLabel = formatBitrate(bitrateEstimateBitsPerSecond),
+                                redirectProbeState = redirectProbeState,
                                 entryPlaybackUrl = activeStreamOption.streamUrl,
                                 currentPlaybackUrl = resolvedPlaybackUrl,
                             )
                         }
+                    }
+
+                    if (
+                        !episodeTitle.isNullOrBlank() &&
+                        !showTrackSheet &&
+                        !showRuntimeSheet &&
+                        !showSubtitleSheet
+                    ) {
+                        PlayerEpisodeTitleOverlay(
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .playerBottomOverlayInsets(isLandscapeFullscreen || isLandscapeLayout)
+                                .padding(
+                                    start = 28.dp,
+                                    end = 28.dp + landscapeNavBarRightPadding,
+                                    bottom = if (isLandscapeFullscreen || isLandscapeLayout) 86.dp else 148.dp,
+                                ),
+                            title = episodeTitle,
+                            compact = isLandscapeFullscreen || isLandscapeLayout,
+                        )
                     }
 
                     PlayerBottomControls(
@@ -1704,9 +1814,9 @@ fun PlayerScreen(
                             .playerBottomOverlayInsets(isLandscapeFullscreen || isLandscapeLayout)
                             .padding(
                                 start = 24.dp,
-                                top = if (isLandscapeFullscreen || isLandscapeLayout) 4.dp else 22.dp,
+                                top = if (isLandscapeFullscreen || isLandscapeLayout) 4.dp else 18.dp,
                                 end = 24.dp + landscapeNavBarRightPadding,
-                                bottom = if (isLandscapeFullscreen || isLandscapeLayout) 0.dp else 22.dp,
+                                bottom = if (isLandscapeFullscreen || isLandscapeLayout) 0.dp else 10.dp,
                             ),
                         currentPositionMs = if (isScrubbing) sliderPositionMs.toLong() else currentPositionMs,
                         durationMs = durationMs,
@@ -1833,29 +1943,100 @@ private fun Modifier.playerBottomOverlayInsets(
 ): Modifier = if (isLandscapeFullscreen) this else navigationBarsPadding()
 
 @Composable
-private fun PlayerTopActions(
+private fun PlayerTopTitleOverlay(
+    title: String,
+    titleLogoUrl: String?,
+    compact: Boolean,
     modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier.widthIn(max = if (compact) 220.dp else 320.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (!titleLogoUrl.isNullOrBlank()) {
+            AsyncImage(
+                model = titleLogoUrl,
+                contentDescription = title,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 28.dp, max = if (compact) 42.dp else 54.dp),
+                contentScale = ContentScale.Fit,
+                alignment = Alignment.CenterStart,
+            )
+        } else if (title.isNotBlank()) {
+            Text(
+                text = title,
+                style = if (compact) {
+                    MaterialTheme.typography.titleLarge
+                } else {
+                    MaterialTheme.typography.headlineSmall
+                }.copy(fontFamily = AppTitleFontFamily),
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun PlayerEpisodeTitleOverlay(
+    title: String,
+    compact: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        text = title,
+        modifier = modifier.widthIn(max = if (compact) 260.dp else 320.dp),
+        style = if (compact) {
+            MaterialTheme.typography.bodyMedium
+        } else {
+            MaterialTheme.typography.titleSmall
+        },
+        color = Color.White.copy(alpha = 0.94f),
+        fontWeight = FontWeight.SemiBold,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
+}
+
+@Composable
+private fun PlayerTopBar(
+    modifier: Modifier = Modifier,
+    title: String,
+    titleLogoUrl: String?,
+    compact: Boolean,
     onClose: () -> Unit,
-    onToggleLock: () -> Unit,
 ) {
     Row(
-        modifier = modifier
-            .clip(RoundedCornerShape(22.dp))
-            .background(PlayerPanelColor)
-            .padding(horizontal = 6.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        PlayerOverlayIconButton(
-            icon = Icons.AutoMirrored.Rounded.ArrowBack,
-            contentDescription = "返回",
-            onClick = onClose,
-        )
-        PlayerOverlayIconButton(
-            icon = Icons.Rounded.Lock,
-            contentDescription = "锁定控制",
-            onClick = onToggleLock,
-        )
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(22.dp))
+                .background(PlayerPanelColor)
+                .padding(horizontal = 6.dp, vertical = 6.dp),
+        ) {
+            PlayerOverlayIconButton(
+                icon = Icons.AutoMirrored.Rounded.ArrowBack,
+                contentDescription = "返回",
+                onClick = onClose,
+            )
+        }
+
+        if (title.isNotBlank() || !titleLogoUrl.isNullOrBlank()) {
+            PlayerTopTitleOverlay(
+                title = title,
+                titleLogoUrl = titleLogoUrl,
+                compact = compact,
+                modifier = Modifier.weight(1f),
+            )
+        } else {
+            Spacer(modifier = Modifier.weight(1f))
+        }
     }
 }
 
@@ -1865,6 +2046,7 @@ private fun PlayerSidePills(
     subtitleChoiceLabel: String,
     playbackSpeed: Float,
     isLandscapeFullscreen: Boolean,
+    onToggleLock: () -> Unit,
     onToggleSubtitleSheet: () -> Unit,
     onToggleFullscreen: () -> Unit,
     onDecreaseSpeed: () -> Unit,
@@ -1885,6 +2067,11 @@ private fun PlayerSidePills(
                 icon = Icons.Rounded.Subtitles,
                 contentDescription = subtitleChoiceLabel,
                 onClick = onToggleSubtitleSheet,
+            )
+            PlayerOverlayIconButton(
+                icon = Icons.Rounded.Lock,
+                contentDescription = "锁定控制",
+                onClick = onToggleLock,
             )
             PlayerOverlayIconButton(
                 icon = Icons.Rounded.AspectRatio,
@@ -1949,13 +2136,13 @@ private fun PlayerBottomControls(
         modifier = modifier
             .fillMaxWidth()
             .widthIn(max = 460.dp)
-            .clip(RoundedCornerShape(24.dp))
+            .clip(RoundedCornerShape(22.dp))
             .background(Color(0xE0101010))
             .padding(
                 horizontal = if (compact) 12.dp else 16.dp,
-                vertical = if (compact) 4.dp else 14.dp,
+                vertical = if (compact) 4.dp else 6.dp,
             ),
-        verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 10.dp),
+        verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 5.dp),
     ) {
         PlayerProgressBar(
             progressValue = progressValue,
@@ -1965,7 +2152,7 @@ private fun PlayerBottomControls(
             onScrub = onScrub,
             onScrubStop = onScrubStop,
             modifier = Modifier.fillMaxWidth(),
-            trackHeight = if (compact) 10.dp else 18.dp,
+            trackHeight = if (compact) 10.dp else 12.dp,
         )
 
         if (!compact) {
@@ -1976,12 +2163,12 @@ private fun PlayerBottomControls(
             ) {
                 Text(
                     text = formatPlaybackTime(currentPositionMs),
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodySmall,
                     color = Color.White.copy(alpha = 0.82f),
                 )
                 Text(
                     text = "-${formatPlaybackTime((durationMs - currentPositionMs).coerceAtLeast(0L))}",
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodySmall,
                     color = Color.White.copy(alpha = 0.82f),
                 )
             }
@@ -1994,36 +2181,36 @@ private fun PlayerBottomControls(
             PlayerBottomButton(
                 icon = Icons.Rounded.Info,
                 contentDescription = "媒体信息",
-                containerSize = if (compact) 38.dp else 42.dp,
-                iconSize = if (compact) 20.dp else 22.dp,
+                containerSize = if (compact) 38.dp else 34.dp,
+                iconSize = if (compact) 20.dp else 18.dp,
                 onClick = onOpenInfoSheet,
             )
             PlayerBottomButton(
                 icon = Icons.Rounded.Replay10,
                 contentDescription = "后退10秒",
-                containerSize = if (compact) 38.dp else 42.dp,
-                iconSize = if (compact) 20.dp else 22.dp,
+                containerSize = if (compact) 38.dp else 34.dp,
+                iconSize = if (compact) 20.dp else 18.dp,
                 onClick = onSeekBack,
             )
             PlayerBottomButton(
                 icon = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                 contentDescription = if (isPlaying) "暂停" else "播放",
-                containerSize = if (compact) 48.dp else 56.dp,
-                iconSize = if (compact) 24.dp else 28.dp,
+                containerSize = if (compact) 48.dp else 44.dp,
+                iconSize = if (compact) 24.dp else 22.dp,
                 onClick = onPlayPause,
             )
             PlayerBottomButton(
                 icon = Icons.Rounded.Forward10,
                 contentDescription = "前进10秒",
-                containerSize = if (compact) 38.dp else 42.dp,
-                iconSize = if (compact) 20.dp else 22.dp,
+                containerSize = if (compact) 38.dp else 34.dp,
+                iconSize = if (compact) 20.dp else 18.dp,
                 onClick = onSeekForward,
             )
             PlayerBottomButton(
                 icon = Icons.Rounded.PlayCircle,
                 contentDescription = "播放方式",
-                containerSize = if (compact) 38.dp else 42.dp,
-                iconSize = if (compact) 20.dp else 22.dp,
+                containerSize = if (compact) 38.dp else 34.dp,
+                iconSize = if (compact) 20.dp else 18.dp,
                 onClick = onOpenRuntime,
             )
         }
@@ -2136,8 +2323,10 @@ private fun PlayerTrackSheet(
     title: String,
     subtitleChoiceLabel: String,
     runtimeLabel: String,
+    backendLabel: String,
     streamChoiceLabel: String,
     bitrateLabel: String?,
+    redirectProbeState: RedirectProbeState,
     infoFields: List<EmbyPlaybackInfoField>,
 ) {
     val scrollState = rememberScrollState()
@@ -2174,8 +2363,13 @@ private fun PlayerTrackSheet(
         }
         PlayerInfoFieldRow(label = "当前字幕", value = subtitleChoiceLabel)
         PlayerInfoFieldRow(label = "播放策略", value = runtimeLabel)
+        PlayerInfoFieldRow(label = "播放内核", value = backendLabel)
         PlayerInfoFieldRow(label = "串流方式", value = streamChoiceLabel)
-        bitrateLabel?.let { PlayerInfoFieldRow(label = "实时码率", value = it) }
+        bitrateLabel?.let { PlayerInfoFieldRow(label = "码率", value = it) }
+        PlayerInfoFieldRow(label = "302状态", value = redirectProbeState.statusLabel())
+        redirectProbeState.redirectLocationOrNull()?.let { location ->
+            PlayerInfoFieldRow(label = "302直链", value = location, multiline = true)
+        }
         infoFields.forEach { field ->
             PlayerInfoFieldRow(label = field.label, value = field.value)
         }
@@ -2185,10 +2379,12 @@ private fun PlayerTrackSheet(
 @Composable
 private fun PlayerRuntimeSheet(
     runtimeLabel: String,
+    backendLabel: String,
     streamOptions: List<EmbyPlaybackStreamOption>,
     selectedStreamOptionId: String,
     onSelectStreamOption: (String) -> Unit,
     bitrateLabel: String?,
+    redirectProbeState: RedirectProbeState,
     entryPlaybackUrl: String,
     currentPlaybackUrl: String,
 ) {
@@ -2213,7 +2409,12 @@ private fun PlayerRuntimeSheet(
             fontWeight = FontWeight.SemiBold,
         )
         PlayerInfoFieldRow(label = "播放策略", value = runtimeLabel)
-        bitrateLabel?.let { PlayerInfoFieldRow(label = "实时码率", value = it) }
+        PlayerInfoFieldRow(label = "播放内核", value = backendLabel)
+        bitrateLabel?.let { PlayerInfoFieldRow(label = "码率", value = it) }
+        PlayerInfoFieldRow(label = "302状态", value = redirectProbeState.statusLabel())
+        redirectProbeState.redirectLocationOrNull()?.let { location ->
+            PlayerInfoFieldRow(label = "302直链", value = location, multiline = true)
+        }
         PlayerInfoFieldRow(
             label = if (redirected) "当前直链" else "当前链接",
             value = actualPlaybackUrl,
@@ -2427,10 +2628,10 @@ private fun PlayerStatusBadge(
         PulsingDot(active = isBuffering)
         Text(
             text = when {
-                isBuffering && bitrateLabel != null -> "缓冲中 · 实时码率 $bitrateLabel"
-                isBuffering -> "缓冲中 · 正在测量码率"
-                bitrateLabel != null -> "实时码率 $bitrateLabel"
-                else -> "实时码率 获取中"
+                isBuffering && bitrateLabel != null -> "缓冲中 · $bitrateLabel"
+                isBuffering -> "缓冲中 · 测量中"
+                bitrateLabel != null -> bitrateLabel
+                else -> "获取中"
             },
             style = MaterialTheme.typography.labelLarge,
             color = Color.White,
@@ -2820,6 +3021,67 @@ private fun shouldTrackResolvedPlaybackUrl(
         return false
     }
     return mediaLoadData.dataType == C.DATA_TYPE_MEDIA || mediaLoadData.dataType == C.DATA_TYPE_MANIFEST
+}
+
+private fun shouldProbeRedirectState(
+    optionId: String,
+    streamUrl: String,
+): Boolean {
+    val normalizedOptionId = optionId.trim().lowercase(Locale.US)
+    val normalizedUrl = streamUrl.trim().lowercase(Locale.US)
+    return normalizedOptionId == "server-direct" &&
+        (normalizedUrl.contains("/play/") || normalizedUrl.contains("play_source=emby_proxy"))
+}
+
+private suspend fun probeRedirectState(
+    url: String,
+    requestHeaders: Map<String, String>,
+): RedirectProbeState = withContext(Dispatchers.IO) {
+    runCatching {
+        val client = OkHttpClient.Builder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .retryOnConnectionFailure(true)
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .build()
+        val requestBuilder = Request.Builder()
+            .url(url)
+            .header("Accept-Encoding", "identity")
+            .header("Range", "bytes=0-0")
+        requestHeaders.forEach { (name, value) ->
+            if (name.isNotBlank() && value.isNotBlank()) {
+                requestBuilder.header(name, value)
+            }
+        }
+        client.newCall(requestBuilder.get().build()).execute().use { response ->
+            val location = response.header("Location").orEmpty().trim()
+            when {
+                response.code in 300..399 && location.isNotBlank() ->
+                    RedirectProbeState.Hit(code = response.code, location = location)
+                response.isSuccessful || response.code == 206 ->
+                    RedirectProbeState.NoRedirect(code = response.code)
+                else ->
+                    RedirectProbeState.Failed("HTTP ${response.code}")
+            }
+        }
+    }.getOrElse { error ->
+        RedirectProbeState.Failed(error.message ?: "探测失败")
+    }
+}
+
+private fun RedirectProbeState.statusLabel(): String = when (this) {
+    RedirectProbeState.Idle -> "待探测"
+    RedirectProbeState.Loading -> "探测中"
+    is RedirectProbeState.Hit -> "已命中 302 (HTTP $code)"
+    is RedirectProbeState.NoRedirect -> "未重定向 (HTTP $code)"
+    is RedirectProbeState.Skipped -> reason
+    is RedirectProbeState.Failed -> message
+}
+
+private fun RedirectProbeState.redirectLocationOrNull(): String? = when (this) {
+    is RedirectProbeState.Hit -> location
+    else -> null
 }
 
 private fun String.isSubtitleLikeUri(): Boolean {

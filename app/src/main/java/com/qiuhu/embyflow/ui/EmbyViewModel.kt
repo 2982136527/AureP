@@ -187,7 +187,7 @@ class EmbyViewModel(
         val activeSession = session ?: return
         val repository = repository ?: return
         val requestGeneration = ++playbackRequestGeneration
-        val resolvedMedia = resolveMediaWithResume(media)
+        val resolvedMedia = enrichPlaybackBrandingFromCache(resolveMediaWithResume(media))
         val cachedDirectSource = resolvedMedia
             .takeIf(::canWarmPlaybackSource)
             ?.let { playbackSourceCache[it.id] }
@@ -196,6 +196,10 @@ class EmbyViewModel(
                 media = resolvedMedia,
                 source = cachedDirectSource,
                 initialPositionMs = resolvedMedia.resumePositionMs.coerceAtLeast(0L),
+            )
+            refreshPlaybackBrandingIfNeeded(
+                media = resolvedMedia,
+                requestGeneration = requestGeneration,
             )
             return
         }
@@ -213,7 +217,9 @@ class EmbyViewModel(
                     token = activeSession.accessToken,
                     media = resolvedMedia,
                 )
-                val resolvedPlayableMedia = resolveMediaWithResume(playableMedia)
+                val resolvedPlayableMedia = enrichPlaybackBrandingFromCache(
+                    resolveMediaWithResume(playableMedia),
+                )
                 val initialPositionMs = resolvedPlayableMedia.resumePositionMs.coerceAtLeast(0L)
                 val source = awaitPlaybackSource(
                     activeSession = activeSession,
@@ -236,6 +242,10 @@ class EmbyViewModel(
                     media = playableMedia,
                     source = source,
                     initialPositionMs = initialPositionMs,
+                )
+                refreshPlaybackBrandingIfNeeded(
+                    media = playableMedia,
+                    requestGeneration = requestGeneration,
                 )
             }.onFailure { throwable ->
                 loadingGate.cancel()
@@ -1165,8 +1175,121 @@ class EmbyViewModel(
         return resolveScopedResumeItem(media)?.resumePositionMs?.coerceAtLeast(0L) ?: 0L
     }
 
+    private fun needsPlaybackBrandingRefresh(media: MediaItem): Boolean {
+        return when {
+            media.isEpisode -> !media.seriesId.isNullOrBlank() && media.seriesTitleLogoUrl.isNullOrBlank()
+            media.isFolder -> false
+            else -> media.titleLogoUrl.isNullOrBlank()
+        }
+    }
+
+    private fun enrichPlaybackBrandingFromCache(media: MediaItem): MediaItem {
+        val cachedSelf = _mediaDetails.value[media.id]
+        val cachedSeries = media.seriesId
+            ?.takeIf { media.isEpisode && it.isNotBlank() }
+            ?.let(_mediaDetails.value::get)
+
+        return media.copy(
+            titleLogoUrl = media.titleLogoUrl ?: cachedSelf?.titleLogoUrl,
+            seriesTitleLogoUrl = media.seriesTitleLogoUrl
+                ?: cachedSelf?.seriesTitleLogoUrl
+                ?: cachedSeries?.titleLogoUrl
+                ?: cachedSeries?.seriesTitleLogoUrl,
+            seriesPrimaryImageUrl = media.seriesPrimaryImageUrl
+                ?: cachedSelf?.seriesPrimaryImageUrl
+                ?: cachedSeries?.primaryImageUrl
+                ?: cachedSeries?.seriesPrimaryImageUrl,
+            seriesBackdropImageUrl = media.seriesBackdropImageUrl
+                ?: cachedSelf?.seriesBackdropImageUrl
+                ?: cachedSeries?.backdropImageUrl
+                ?: cachedSeries?.seriesBackdropImageUrl,
+        )
+    }
+
+    private fun refreshPlaybackBrandingIfNeeded(
+        media: MediaItem,
+        requestGeneration: Long,
+    ) {
+        if (!needsPlaybackBrandingRefresh(media)) return
+        val activeSession = session ?: return
+        val activeRepository = repository ?: return
+
+        viewModelScope.launch {
+            val detail = runCatching {
+                activeRepository.loadMediaDetail(
+                    userId = activeSession.userId,
+                    token = activeSession.accessToken,
+                    itemId = media.id,
+                )
+            }.getOrNull() ?: media
+            val seriesDetail = media.seriesId
+                ?.takeIf { media.isEpisode && it.isNotBlank() }
+                ?.let { seriesId ->
+                    runCatching {
+                        activeRepository.loadMediaDetail(
+                            userId = activeSession.userId,
+                            token = activeSession.accessToken,
+                            itemId = seriesId,
+                        )
+                    }.getOrNull()
+                }
+
+            val enrichedMedia = enrichPlaybackBrandingFromCache(
+                resolveMediaWithResume(
+                    detail.copy(
+                        resumePositionMs = maxOf(detail.resumePositionMs, media.resumePositionMs),
+                        titleLogoUrl = detail.titleLogoUrl ?: media.titleLogoUrl,
+                        seriesTitleLogoUrl = detail.seriesTitleLogoUrl
+                            ?: media.seriesTitleLogoUrl
+                            ?: seriesDetail?.titleLogoUrl
+                            ?: seriesDetail?.seriesTitleLogoUrl,
+                        seriesPrimaryImageUrl = detail.seriesPrimaryImageUrl
+                            ?: media.seriesPrimaryImageUrl
+                            ?: seriesDetail?.primaryImageUrl
+                            ?: seriesDetail?.seriesPrimaryImageUrl,
+                        seriesBackdropImageUrl = detail.seriesBackdropImageUrl
+                            ?: media.seriesBackdropImageUrl
+                            ?: seriesDetail?.backdropImageUrl
+                            ?: seriesDetail?.seriesBackdropImageUrl,
+                    ),
+                ),
+            )
+
+            _mediaDetails.update { current ->
+                buildMap {
+                    putAll(current)
+                    put(enrichedMedia.id, enrichedMedia)
+                    seriesDetail?.let { put(it.id, it) }
+                }
+            }
+
+            if (requestGeneration != playbackRequestGeneration) {
+                return@launch
+            }
+
+            _playbackState.update { current ->
+                val ready = current as? PlaybackUiState.Ready ?: return@update current
+                if (ready.media.id != media.id) {
+                    current
+                } else {
+                    ready.copy(
+                        media = enrichPlaybackBrandingFromCache(
+                            ready.media.mergeWithResumeFallback(enrichedMedia),
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
     private fun resolveMediaWithResume(media: MediaItem): MediaItem {
         val cachedMedia = _mediaDetails.value[media.id]
+        val cachedSeriesTitleLogoUrl = media.seriesId
+            ?.takeIf { media.isEpisode && it.isNotBlank() }
+            ?.let { seriesId ->
+                _mediaDetails.value[seriesId]?.titleLogoUrl
+                    ?: _mediaDetails.value[seriesId]?.seriesTitleLogoUrl
+            }
         val scopedResumeItem = resolveScopedResumeItem(media)
         val cachedSeriesPrimaryImageUrl = media.seriesId
             ?.takeIf { media.isEpisode && it.isNotBlank() }
@@ -1192,6 +1315,7 @@ class EmbyViewModel(
             seasonId = media.seasonId ?: cachedMedia?.seasonId,
             seasonNumber = media.seasonNumber ?: cachedMedia?.seasonNumber,
             episodeNumber = media.episodeNumber ?: cachedMedia?.episodeNumber,
+            seriesTitleLogoUrl = resolvedMedia.seriesTitleLogoUrl ?: cachedSeriesTitleLogoUrl,
             seriesPrimaryImageUrl = resolvedMedia.seriesPrimaryImageUrl ?: cachedSeriesPrimaryImageUrl,
             seriesBackdropImageUrl = resolvedMedia.seriesBackdropImageUrl ?: cachedSeriesBackdropImageUrl,
         )

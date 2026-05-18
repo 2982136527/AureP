@@ -208,6 +208,7 @@ fun EmbyFlowApp(
             when (val player = playbackState) {
                 is PlaybackUiState.Loading -> PlayerLoadingScreen(title = player.media.title)
                 is PlaybackUiState.Ready -> PlayerScreen(
+                    media = player.media,
                     mediaId = player.media.id,
                     title = player.source.title,
                     source = player.source,

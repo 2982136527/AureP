@@ -286,7 +286,7 @@ private fun TodayContinueWatchingRow(
                     imageUrlOverride = item.continueWatchingCardImageUrl(),
                     transparentFooter = true,
                     preferTitleLogo = true,
-                    topLeftLabel = item.subtitle,
+                    topLeftLabel = item.continueWatchingResumeLabel(),
                     plainTopLabels = true,
                     onClick = { onOpenMedia(item.continueWatchingNavigationTarget()) },
                 )
@@ -324,10 +324,31 @@ private fun MediaItem.continueWatchingCardImageUrl(): String? {
     }
 }
 
+private fun MediaItem.continueWatchingResumeLabel(): String? {
+    val positionMs = resumePositionMs.coerceAtLeast(0L)
+    return if (positionMs > 0L) {
+        "看到 ${formatResumeTime(positionMs)}"
+    } else {
+        null
+    }
+}
+
 private fun MediaItem.continueWatchingDisplayKey(): String = when {
     !seriesId.isNullOrBlank() -> "series:$seriesId"
     isEpisode -> "series:${seriesName.takeIf { it.isNotBlank() } ?: id}"
     else -> "item:$id"
+}
+
+private fun formatResumeTime(valueMs: Long): String {
+    val totalSeconds = (valueMs / 1000L).coerceAtLeast(0L)
+    val hours = totalSeconds / 3600L
+    val minutes = (totalSeconds % 3600L) / 60L
+    val seconds = totalSeconds % 60L
+    return if (hours > 0L) {
+        "%d:%02d:%02d".format(hours, minutes, seconds)
+    } else {
+        "%02d:%02d".format(minutes, seconds)
+    }
 }
 
 @Composable
@@ -921,20 +942,38 @@ private fun TodayCardFooter(
         Column(
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            if (preferTitleLogo && media.isEpisode && !media.seriesTitleLogoUrl.isNullOrBlank()) {
-                TodayCardLogo(
-                    model = media.seriesTitleLogoUrl,
-                    contentDescription = media.seriesName.ifBlank { media.title },
-                    compact = compact,
-                )
-                Text(
-                    text = media.title,
-                    style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
-                    color = Color.White,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            if (preferTitleLogo && media.isEpisode) {
+                val primaryEpisodeTitle = media.seriesName.ifBlank { media.title }
+                val secondaryEpisodeTitle = media.title.takeIf {
+                    it.isNotBlank() && it != primaryEpisodeTitle
+                }
+                val episodeLogoModel = media.seriesTitleLogoUrl ?: media.titleLogoUrl
+                if (!episodeLogoModel.isNullOrBlank()) {
+                    TodayCardLogo(
+                        model = episodeLogoModel,
+                        contentDescription = primaryEpisodeTitle,
+                        compact = compact,
+                    )
+                } else {
+                    Text(
+                        text = primaryEpisodeTitle,
+                        style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                secondaryEpisodeTitle?.let { episodeTitle ->
+                    Text(
+                        text = episodeTitle,
+                        style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             } else {
                 TodayCardTitle(
                     media = media,
