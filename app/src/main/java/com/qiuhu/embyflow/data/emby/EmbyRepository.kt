@@ -391,8 +391,7 @@ class EmbyRepository(
         limit: Int = LibraryPageSize,
     ): EmbyPagedMediaItems = withContext(Dispatchers.IO) {
         val sortSpec = librarySortSpec(sortMode)
-        val normalizedCollectionType = collectionType.lowercase(Locale.US)
-        val includeItemTypes = when (normalizedCollectionType) {
+        val includeItemTypes = when (collectionType.lowercase(Locale.US)) {
             "tvshows" -> "Series"
             else -> "Movie,Episode,Series,Video"
         }
@@ -415,9 +414,6 @@ class EmbyRepository(
         )
         val items = result.Items
             .map { it.toMediaItem(token = token) }
-            .filterNot { media ->
-                normalizedCollectionType == "tvshows" && media.isFolder
-            }
         EmbyPagedMediaItems(
             items = items,
             totalCount = result.TotalRecordCount,
@@ -622,6 +618,7 @@ class EmbyRepository(
         )
         val source = playbackInfo.MediaSources.firstOrNull()
             ?: throw IllegalStateException("服务端没有返回可播放媒体源")
+        val playSessionId = playbackInfo.PlaySessionId?.takeIf { it.isNotBlank() }
         val subtitleTracks = source.buildSubtitleTracks(
             itemId = itemId,
             baseUrl = baseUrl,
@@ -631,7 +628,7 @@ class EmbyRepository(
             itemId = itemId,
             baseUrl = baseUrl,
             token = token,
-            playSessionId = playbackInfo.PlaySessionId,
+            playSessionId = playSessionId,
         )
         val selectedStreamOption = streamOptions.firstOrNull()
             ?: throw IllegalStateException("服务端没有返回可用播放链路")
@@ -689,7 +686,7 @@ class EmbyRepository(
             streamUrl = selectedStreamOption.streamUrl,
             title = source.Name ?: fallbackTitle,
             mediaSourceId = source.Id,
-            playSessionId = playbackInfo.PlaySessionId,
+            playSessionId = playSessionId,
             infoLine = source.buildInfoLine(
                 subtitleCount = subtitleTracks.size,
             ),
@@ -1248,15 +1245,6 @@ class EmbyRepository(
                 requestHeaders = requestHeaders,
             )
         }
-        val transcodingServerOption = resolveTranscodingUrl(baseUrl, token)?.let { transcodingUrl ->
-            EmbyPlaybackStreamOption(
-                id = "server-transcode",
-                label = "兼容转码",
-                description = "由 Emby 生成兼容链路，遇到 HEVC、10-bit 或特殊音轨时更稳。",
-                streamUrl = transcodingUrl,
-                requestHeaders = requestHeaders,
-            )
-        }
         val managedOptions = listOf(
             EmbyPlaybackStreamOption(
                 id = "emby-direct",
@@ -1272,7 +1260,7 @@ class EmbyRepository(
                 ),
             ),
         )
-        return (listOfNotNull(directServerOption) + managedOptions + listOfNotNull(transcodingServerOption))
+        return (listOfNotNull(directServerOption) + managedOptions)
             .distinctBy { option ->
             "${option.streamUrl}|${option.requestHeaders}"
         }
@@ -1291,15 +1279,6 @@ class EmbyRepository(
         } else {
             directUrl
         }
-    }
-
-    private fun PlaybackMediaSourceDto.resolveTranscodingUrl(
-        baseUrl: String,
-        token: String,
-    ): String? {
-        return TranscodingUrl
-            .toServerAbsoluteUrl(baseUrl)
-            ?.appendApiKeyQueryIfMissing(token)
     }
 
     private fun String?.toServerAbsoluteUrl(baseUrl: String): String? {
@@ -1383,7 +1362,6 @@ class EmbyRepository(
     private fun EmbyPlaybackStreamOption.streamPriority(): Int = when (id) {
         "server-direct" -> 0
         "emby-direct" -> 1
-        "server-transcode" -> 2
         else -> 99
     }
 

@@ -115,9 +115,9 @@ import androidx.media3.exoplayer.source.LoadEventInfo
 import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.datasource.StatsDataSource
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -137,6 +137,8 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 import kotlinx.coroutines.delay
+import okhttp3.OkHttpClient
+import java.util.concurrent.TimeUnit
 
 private val PlayerAccentColor = Color(0xFFF0E7DA)
 private val PlayerPanelColor = Color(0xCC101010)
@@ -167,8 +169,11 @@ fun PlayerScreen(
     val runtimeProfile = remember(settings.playerMode) {
         settings.toPlayerRuntimeProfile()
     }
-    val autoSubtitleTracks = remember(source, settings.subtitleMode) {
-        source.subtitleTracks.applySubtitleStrategy(settings.subtitleMode)
+    val playableSubtitleTracks = remember(source.subtitleTracks) {
+        source.subtitleTracks.filter { it.isExternal }
+    }
+    val autoSubtitleTracks = remember(playableSubtitleTracks, settings.subtitleMode) {
+        playableSubtitleTracks.applySubtitleStrategy(settings.subtitleMode)
     }
     val streamOptions = remember(source.streamOptions, source.streamUrl) {
         if (source.streamOptions.isNotEmpty()) {
@@ -266,6 +271,9 @@ fun PlayerScreen(
     var forceVlcCompatibilityBackend by rememberSaveable(mediaId) {
         mutableStateOf(false)
     }
+    var compatibilityPlaybackUrl by remember(mediaId) {
+        mutableStateOf<String?>(null)
+    }
     val activity = remember(context) {
         context.findActivity()
     }
@@ -297,19 +305,19 @@ fun PlayerScreen(
         mutableStateOf(false)
     }
 
-    val activeSubtitleTracks = remember(source, autoSubtitleTracks, selectedSubtitleIndex) {
+    val activeSubtitleTracks = remember(playableSubtitleTracks, autoSubtitleTracks, selectedSubtitleIndex) {
         when (selectedSubtitleIndex) {
             null -> autoSubtitleTracks
             SUBTITLE_OFF -> emptyList()
-            else -> source.subtitleTracks
+            else -> playableSubtitleTracks
                 .filter { it.index == selectedSubtitleIndex }
                 .map { it.copy(isDefault = true) }
         }
     }
-    val subtitleChoiceLabel = remember(source.subtitleTracks, autoSubtitleTracks, selectedSubtitleIndex) {
+    val subtitleChoiceLabel = remember(playableSubtitleTracks, autoSubtitleTracks, selectedSubtitleIndex) {
         formatSubtitleChoiceLabel(
             selectedSubtitleIndex = selectedSubtitleIndex,
-            sourceTracks = source.subtitleTracks,
+            sourceTracks = playableSubtitleTracks,
             autoTracks = autoSubtitleTracks,
         )
     }
@@ -506,8 +514,14 @@ fun PlayerScreen(
                     runtimeProfile.bufferForPlaybackAfterRebufferMs,
                 )
                 .build()
-            val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-                .setAllowCrossProtocolRedirects(true)
+            val okHttpClient = OkHttpClient.Builder()
+                .retryOnConnectionFailure(true)
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(30, TimeUnit.SECONDS)
+                .build()
+            val httpDataSourceFactory = OkHttpDataSource.Factory(okHttpClient)
                 .setDefaultRequestProperties(activeStreamOption.requestHeaders)
             val trackingDataSourceFactory = TrackingDataSourceFactory(
                 upstream = httpDataSourceFactory,
@@ -542,13 +556,20 @@ fun PlayerScreen(
                     playbackParameters = PlaybackParameters(playbackSpeed)
                     playWhenReady = resumePlayWhenReady
                     volume = if (experimentalDualBackendRace) 0f else 1f
-                }
+            }
         }
+    }
+    val vlcPlaybackUrl = remember(
+        activeStreamOption.id,
+        activeStreamOption.streamUrl,
+        compatibilityPlaybackUrl,
+    ) {
+        compatibilityPlaybackUrl?.takeIf { it.isNotBlank() } ?: activeStreamOption.streamUrl
     }
     val vlcPlayer = if (preferredBackendKind == PlayerBackendKind.Vlc || experimentalDualBackendRace) {
         remember(
             context,
-            activeStreamOption.streamUrl,
+            vlcPlaybackUrl,
             activeSubtitleTracks,
             activeStreamOption.requestHeaders,
             resumePositionMs,
@@ -558,7 +579,7 @@ fun PlayerScreen(
         ) {
             VlcPlayerSession(
                 context = context,
-                streamUrl = activeStreamOption.streamUrl,
+                streamUrl = vlcPlaybackUrl,
                 subtitleTracks = activeSubtitleTracks,
                 requestHeaders = activeStreamOption.requestHeaders,
                 forceSoftwareDecode = vlcForceSoftwareDecode,
@@ -632,12 +653,7 @@ fun PlayerScreen(
         else -> selectedSubtitleIndex
     }
 
-    fun currentPlayMethod(): String = when (activeStreamOption.id) {
-        "server-transcode",
-        -> "Transcode"
-
-        else -> "DirectStream"
-    }
+    fun currentPlayMethod(): String = "DirectStream"
 
     fun buildPlaybackSessionState(
         positionOverrideMs: Long? = null,
@@ -778,6 +794,9 @@ fun PlayerScreen(
             PlayerDebugTag,
             "force vlc backend title=$title mediaId=$mediaId trigger=$trigger option=${activeStreamOption.id} url=${activeStreamOption.streamUrl}",
         )
+        compatibilityPlaybackUrl = resolvedPlaybackUrl.takeIf { candidate ->
+            candidate.isNotBlank() && candidate != activeStreamOption.streamUrl
+        }
         capturePlaybackState()
         resumePlayWhenReady = true
         forceVlcCompatibilityBackend = true
@@ -1053,6 +1072,7 @@ fun PlayerScreen(
         hasRenderedFirstFrame = false
         bitrateEstimateBitsPerSecond = 0L
         resolvedPlaybackUrl = activeStreamOption.streamUrl
+        compatibilityPlaybackUrl = null
         activeBackendKindName = preferredBackendKind.name
         raceResolved = !experimentalDualBackendRace
         exoFirstFrameAtMs = 0L
@@ -1071,12 +1091,29 @@ fun PlayerScreen(
         vlcPlayer,
         activeStreamOption.id,
     ) {
-        delay(12_000)
+        val startupTimeoutMs = 12_000L
+        delay(startupTimeoutMs)
         if (
             !hasRenderedFirstFrame &&
             shouldExpectPlaybackToStart() &&
             playbackStateSnapshot() != Player.STATE_ENDED
         ) {
+            val bytesRead = playbackTrafficTracker.totalBytesRead()
+            if (bytesRead > 0L) {
+                val extraWaitMs = 18_000L
+                Log.i(
+                    PlayerDebugTag,
+                    "startup still flowing title=$title mediaId=$mediaId option=${activeStreamOption.id} bytes=$bytesRead extraWaitMs=$extraWaitMs entry=${activeStreamOption.streamUrl} resolved=$resolvedPlaybackUrl",
+                )
+                delay(extraWaitMs)
+                if (
+                    hasRenderedFirstFrame ||
+                    !shouldExpectPlaybackToStart() ||
+                    playbackStateSnapshot() == Player.STATE_ENDED
+                ) {
+                    return@LaunchedEffect
+                }
+            }
             if (activeBackendKind == PlayerBackendKind.Exo && sourceRequiresCompatibilityBackend) {
                 forceCompatibilityBackend("老封装起播超时")
                 return@LaunchedEffect
@@ -1562,7 +1599,7 @@ fun PlayerScreen(
                         when {
                             showSubtitleSheet -> PlayerSubtitleSheet(
                                 subtitleOptions = buildSubtitleOptions(
-                                    sourceTracks = source.subtitleTracks,
+                                    sourceTracks = playableSubtitleTracks,
                                     autoTracks = autoSubtitleTracks,
                                     selectedSubtitleIndex = selectedSubtitleIndex,
                                 ),
