@@ -28,6 +28,7 @@ import com.qiuhu.embyflow.model.MediaTag
 import com.qiuhu.embyflow.model.SampleCatalog
 import com.qiuhu.embyflow.model.ServerProfile
 import com.qiuhu.embyflow.model.ServerProfilesState
+import com.qiuhu.embyflow.model.isEpisode
 import com.qiuhu.embyflow.model.isSeason
 import com.qiuhu.embyflow.model.isSeries
 import com.qiuhu.embyflow.model.normalized
@@ -131,7 +132,9 @@ class EmbyViewModel(
     private val playbackSourceJobs = mutableMapOf<String, Deferred<Result<EmbyPlaybackSource>>>()
     private var playbackRequestGeneration: Long = 0L
     private var searchJob: Job? = null
+    private var resumeLogoEnrichmentJob: Job? = null
     private var searchGeneration: Long = 0L
+    private val resumeLogoAttemptedIds = mutableSetOf<String>()
 
     private val _uiState = MutableStateFlow<EmbyUiState>(EmbyUiState.Loading)
     val uiState: StateFlow<EmbyUiState> = _uiState.asStateFlow()
@@ -941,6 +944,8 @@ class EmbyViewModel(
             _mediaDetails.value = emptyMap()
             _seriesDetails.value = emptyMap()
             detailLoadingIds.clear()
+            resumeLogoAttemptedIds.clear()
+            resumeLogoEnrichmentJob?.cancel()
             _searchState.update { current ->
                 current.copy(
                     query = "",
@@ -980,6 +985,7 @@ class EmbyViewModel(
         _uiState.value = EmbyUiState.Ready(
             payload = result.payload.withMergedResume(localResumeItems),
         )
+        scheduleResumeLogoEnrichment()
     }
 
     private fun observeSettings() {
@@ -1000,6 +1006,88 @@ class EmbyViewModel(
                         (current as? EmbyUiState.Ready)?.copy(
                             payload = payload.withMergedResume(localResumeItems),
                         ) ?: current
+                    }
+                    scheduleResumeLogoEnrichment()
+                }
+            }
+        }
+    }
+
+    private fun scheduleResumeLogoEnrichment() {
+        val activeSession = session ?: return
+        val activeRepository = repository ?: return
+        val currentPayload = (_uiState.value as? EmbyUiState.Ready)?.payload ?: return
+    val targets = currentPayload.resumeItems
+            .asSequence()
+            .filterNot { it.isFolder }
+            .filter { item ->
+                item.titleLogoUrl.isNullOrBlank() ||
+                    (item.isEpisode && !item.seriesId.isNullOrBlank() && item.seriesTitleLogoUrl.isNullOrBlank())
+            }
+            .filterNot { resumeLogoAttemptedIds.contains(it.id) }
+            .take(8)
+            .toList()
+
+        if (targets.isEmpty()) return
+
+        targets.forEach { resumeLogoAttemptedIds += it.id }
+        resumeLogoEnrichmentJob?.cancel()
+        resumeLogoEnrichmentJob = viewModelScope.launch {
+            targets.forEach { item ->
+                runCatching {
+                    activeRepository.loadMediaDetail(
+                        userId = activeSession.userId,
+                        token = activeSession.accessToken,
+                        itemId = item.id,
+                    )
+                }.onSuccess { detail ->
+                    val seriesTitleLogoUrl = if (detail.isEpisode && !detail.seriesId.isNullOrBlank()) {
+                        runCatching {
+                            activeRepository.loadMediaDetail(
+                                userId = activeSession.userId,
+                                token = activeSession.accessToken,
+                                itemId = detail.seriesId,
+                            )
+                        }.getOrNull()?.titleLogoUrl
+                    } else {
+                        null
+                    }
+                    val enrichedDetail = detail.copy(
+                        resumePositionMs = maxOf(
+                            detail.resumePositionMs,
+                            item.resumePositionMs,
+                            resolveScopedResumePosition(item.id),
+                        ),
+                        seriesTitleLogoUrl = detail.seriesTitleLogoUrl
+                            ?: seriesTitleLogoUrl
+                            ?: item.seriesTitleLogoUrl,
+                    )
+                    _mediaDetails.update { current -> current + (item.id to enrichedDetail) }
+                    serverPayload = serverPayload?.copy(
+                        resumeItems = serverPayload
+                            ?.resumeItems
+                            .orEmpty()
+                            .map { resumeItem ->
+                                if (resumeItem.id == item.id) {
+                                    enrichedDetail
+                                } else {
+                                    resumeItem
+                                }
+                            },
+                    )
+                    _uiState.update { current ->
+                        val ready = current as? EmbyUiState.Ready ?: return@update current
+                        ready.copy(
+                            payload = ready.payload.copy(
+                                resumeItems = ready.payload.resumeItems.map { resumeItem ->
+                                    if (resumeItem.id == item.id) {
+                                        enrichedDetail.mergeWithLocalResume(resumeItem)
+                                    } else {
+                                        resumeItem
+                                    }
+                                },
+                            ),
+                        )
                     }
                 }
             }
@@ -1249,7 +1337,42 @@ private fun mergeResumeItems(
         items[item.id] = item
     }
     serverItems.forEach { item ->
-        items.putIfAbsent(item.id, item)
+        val localItem = items[item.id]
+        items[item.id] = if (localItem == null) {
+            item
+        } else {
+            item.mergeWithLocalResume(localItem)
+        }
     }
     return items.values.toList()
 }
+
+private fun MediaItem.mergeWithLocalResume(
+    localResume: MediaItem,
+): MediaItem = copy(
+    title = title.ifBlank { localResume.title },
+    subtitle = localResume.subtitle.ifBlank { subtitle },
+    meta = meta.ifBlank { localResume.meta },
+    summary = summary.ifBlank { localResume.summary },
+    score = score.ifBlank { localResume.score },
+    colors = if (colors.isNotEmpty()) colors else localResume.colors,
+    year = year.ifBlank { localResume.year },
+    genres = if (genres.isNotEmpty()) genres else localResume.genres,
+    primaryImageAspectRatio = primaryImageAspectRatio ?: localResume.primaryImageAspectRatio,
+    primaryImageUrl = primaryImageUrl ?: localResume.primaryImageUrl,
+    titleLogoUrl = titleLogoUrl ?: localResume.titleLogoUrl,
+    seriesTitleLogoUrl = seriesTitleLogoUrl ?: localResume.seriesTitleLogoUrl,
+    backdropImageUrl = backdropImageUrl ?: localResume.backdropImageUrl,
+    extraFanartUrls = if (extraFanartUrls.isNotEmpty()) extraFanartUrls else localResume.extraFanartUrls,
+    actors = if (actors.isNotEmpty()) actors else localResume.actors,
+    mediaType = mediaType.ifBlank { localResume.mediaType },
+    collectionType = collectionType.ifBlank { localResume.collectionType },
+    seriesId = seriesId ?: localResume.seriesId,
+    seriesName = seriesName.ifBlank { localResume.seriesName },
+    seasonId = seasonId ?: localResume.seasonId,
+    seasonNumber = seasonNumber ?: localResume.seasonNumber,
+    episodeNumber = episodeNumber ?: localResume.episodeNumber,
+    childCount = childCount ?: localResume.childCount,
+    unplayedItemCount = unplayedItemCount ?: localResume.unplayedItemCount,
+    resumePositionMs = maxOf(resumePositionMs, localResume.resumePositionMs),
+)

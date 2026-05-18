@@ -16,6 +16,7 @@ data class MediaItem(
     val primaryImageAspectRatio: Double? = null,
     val primaryImageUrl: String? = null,
     val titleLogoUrl: String? = null,
+    val seriesTitleLogoUrl: String? = null,
     val backdropImageUrl: String? = null,
     val extraFanartUrls: List<String> = emptyList(),
     val actors: List<MediaPerson> = emptyList(),

@@ -75,6 +75,7 @@ import coil.request.ImageRequest
 import com.qiuhu.embyflow.model.cardEpisodeBadgeLabel
 import com.qiuhu.embyflow.model.MediaItem
 import com.qiuhu.embyflow.model.hasBackdropImage
+import com.qiuhu.embyflow.model.isEpisode
 import com.qiuhu.embyflow.ui.components.MediaPosterCornerBadge
 import com.qiuhu.embyflow.ui.components.PixelCatAsyncImage
 import kotlinx.coroutines.delay
@@ -803,13 +804,29 @@ private fun TodayCardFooter(
             ),
     ) {
         Column(
-            verticalArrangement = Arrangement.spacedBy(2.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            TodayCardTitle(
-                media = media,
-                compact = compact,
-                preferTitleLogo = preferTitleLogo,
-            )
+            if (preferTitleLogo && media.isEpisode && !media.seriesTitleLogoUrl.isNullOrBlank()) {
+                TodayCardLogo(
+                    model = media.seriesTitleLogoUrl,
+                    contentDescription = media.seriesName.ifBlank { media.title },
+                    compact = compact,
+                )
+                Text(
+                    text = media.title,
+                    style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            } else {
+                TodayCardTitle(
+                    media = media,
+                    compact = compact,
+                    preferTitleLogo = preferTitleLogo,
+                )
+            }
             Text(
                 text = media.subtitle.ifBlank { media.meta },
                 style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.bodySmall,
@@ -828,29 +845,10 @@ private fun TodayCardTitle(
     preferTitleLogo: Boolean = false,
 ) {
     if (preferTitleLogo && media.titleLogoUrl != null) {
-        SubcomposeAsyncImage(
+        TodayCardLogo(
             model = media.titleLogoUrl,
             contentDescription = media.title,
-            modifier = Modifier
-                .fillMaxWidth(if (compact) 0.74f else 0.82f)
-                .heightIn(
-                    min = if (compact) 24.dp else 28.dp,
-                    max = if (compact) 30.dp else 38.dp,
-                ),
-            contentScale = ContentScale.Fit,
-            alignment = Alignment.CenterStart,
-            loading = {},
-            success = { SubcomposeAsyncImageContent() },
-            error = {
-                Text(
-                    text = media.title,
-                    style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
-                    color = Color.White,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            },
+            compact = compact,
         )
         return
     }
@@ -862,6 +860,38 @@ private fun TodayCardTitle(
         fontWeight = FontWeight.SemiBold,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
+    )
+}
+
+@Composable
+private fun TodayCardLogo(
+    model: Any?,
+    contentDescription: String?,
+    compact: Boolean,
+) {
+    SubcomposeAsyncImage(
+        model = model,
+        contentDescription = contentDescription,
+        modifier = Modifier
+            .fillMaxWidth(if (compact) 0.74f else 0.82f)
+            .heightIn(
+                min = if (compact) 24.dp else 28.dp,
+                max = if (compact) 30.dp else 38.dp,
+            ),
+        contentScale = ContentScale.Fit,
+        alignment = Alignment.CenterStart,
+        loading = {},
+        success = { SubcomposeAsyncImageContent() },
+        error = {
+            Text(
+                text = contentDescription.orEmpty(),
+                style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
+                color = Color.White,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
     )
 }
 

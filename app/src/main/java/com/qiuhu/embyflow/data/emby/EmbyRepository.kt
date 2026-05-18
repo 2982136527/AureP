@@ -233,7 +233,7 @@ class EmbyRepository(
     private val authorizationHeader =
         "MediaBrowser Client=\"AureP\", Device=\"Android\", DeviceId=\"aurep-android\", Version=\"${BuildConfig.VERSION_NAME}\""
     private val browseFields =
-        "PrimaryImageAspectRatio,Overview,CommunityRating,PremiereDate,Genres,RunTimeTicks,BackdropImageTags,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber,ProductionYear,OfficialRating,RecursiveItemCount,ChildCount,ParentId"
+        "PrimaryImageAspectRatio,Overview,CommunityRating,PremiereDate,Genres,RunTimeTicks,BackdropImageTags,ImageTags,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber,ProductionYear,OfficialRating,RecursiveItemCount,ChildCount,ParentId"
     private val detailFields = "People,$browseFields"
 
     suspend fun bootstrap(
