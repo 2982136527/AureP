@@ -112,6 +112,7 @@ fun EmbyFlowApp(
         val appUpdateState by embyViewModel.appUpdateState.collectAsStateWithLifecycle()
         val libraryGridState = rememberLazyGridState()
         val libraryScrollSnapshots = remember { mutableStateMapOf<String, LibraryScrollSnapshot>() }
+        var playbackTransientErrorMessage by rememberSaveable { mutableStateOf<String?>(null) }
         val payload = currentPayload(uiState)
         val isServerConnected = uiState is EmbyUiState.Ready
         val hasConfiguredServer = serverProfilesState.activeProfile != null
@@ -182,6 +183,20 @@ fun EmbyFlowApp(
 
         val currentRootTab = RootTab.valueOf(currentTab)
 
+        LaunchedEffect(playbackState) {
+            val errorState = playbackState as? PlaybackUiState.Error ?: return@LaunchedEffect
+            playbackTransientErrorMessage = errorState.message
+            embyViewModel.closePlayer()
+        }
+
+        LaunchedEffect(playbackTransientErrorMessage) {
+            val message = playbackTransientErrorMessage ?: return@LaunchedEffect
+            delay(ErrorToastDurationMillis)
+            if (playbackTransientErrorMessage == message) {
+                playbackTransientErrorMessage = null
+            }
+        }
+
         BackHandler(
             enabled = playbackState !is PlaybackUiState.Idle ||
                 searchVisible ||
@@ -232,7 +247,7 @@ fun EmbyFlowApp(
                     isAppendingLibrary = false,
                     libraryGridState = libraryGridState,
                     libraryScrollSnapshots = libraryScrollSnapshots,
-                    errorMessage = player.message,
+                    errorMessage = playbackTransientErrorMessage ?: player.message,
                     onRetry = embyViewModel::closePlayer,
                     onTabSelected = { currentTab = it.name },
                     onOpenMedia = ::openMediaDetail,
@@ -317,7 +332,7 @@ fun EmbyFlowApp(
                                 isAppendingLibrary = false,
                                 libraryGridState = libraryGridState,
                                 libraryScrollSnapshots = libraryScrollSnapshots,
-                                errorMessage = state.detail,
+                                errorMessage = playbackTransientErrorMessage ?: state.detail,
                                 onRetry = embyViewModel::refresh,
                                 onTabSelected = { currentTab = it.name },
                                 onOpenMedia = ::openMediaDetail,
@@ -353,7 +368,7 @@ fun EmbyFlowApp(
                                 isAppendingLibrary = state.isAppendingLibrary,
                                 libraryGridState = libraryGridState,
                                 libraryScrollSnapshots = libraryScrollSnapshots,
-                                errorMessage = null,
+                                errorMessage = playbackTransientErrorMessage,
                                 onRetry = embyViewModel::refresh,
                                 onTabSelected = { currentTab = it.name },
                                 onOpenMedia = ::openMediaDetail,

@@ -79,6 +79,11 @@ sealed interface PlaybackUiState {
     ) : PlaybackUiState
 }
 
+private data class PlaybackSourceJob(
+    val trigger: String,
+    val deferred: Deferred<Result<EmbyPlaybackSource>>,
+)
+
 data class TagBrowseState(
     val activeTag: MediaTag? = null,
     val items: List<MediaItem> = emptyList(),
@@ -112,6 +117,8 @@ data class SeriesDetailState(
 
 private const val PlaybackWarmupDebugTag = "AurePPlaybackWarmup"
 private const val PlaybackLoadingGateDelayMs = 180L
+private const val LocalResumePersistThrottleMs = 4_000L
+private const val LocalResumePersistMinPositionDeltaMs = 1_000L
 
 class EmbyViewModel(
     application: Application,
@@ -129,12 +136,15 @@ class EmbyViewModel(
     private var localResumeItems: List<MediaItem> = emptyList()
     private val detailLoadingIds = mutableSetOf<String>()
     private val playbackSourceCache = mutableMapOf<String, EmbyPlaybackSource>()
-    private val playbackSourceJobs = mutableMapOf<String, Deferred<Result<EmbyPlaybackSource>>>()
+    private val playbackSourceJobs = mutableMapOf<String, PlaybackSourceJob>()
     private var playbackRequestGeneration: Long = 0L
     private var searchJob: Job? = null
     private var resumeLogoEnrichmentJob: Job? = null
     private var searchGeneration: Long = 0L
     private val resumeLogoAttemptedIds = mutableSetOf<String>()
+    private var lastLocalResumePersistKey: String? = null
+    private var lastLocalResumePersistAtMs: Long = 0L
+    private var lastLocalResumePersistPositionMs: Long = 0L
 
     private val _uiState = MutableStateFlow<EmbyUiState>(EmbyUiState.Loading)
     val uiState: StateFlow<EmbyUiState> = _uiState.asStateFlow()
@@ -281,24 +291,13 @@ class EmbyViewModel(
             val profileId = activeServerProfileId
             val userId = session?.userId
             if (!profileId.isNullOrBlank() && !userId.isNullOrBlank()) {
-                applyOptimisticResumeUpdate(
+                persistContinueWatchingSnapshot(
                     media = activeMedia,
                     positionMs = positionMs,
                     durationMs = durationMs,
                     serverProfileId = profileId,
                     serverUserId = userId,
                 )
-            }
-            viewModelScope.launch {
-                if (!profileId.isNullOrBlank() && !userId.isNullOrBlank()) {
-                    continueWatchingStore.update(
-                        media = activeMedia,
-                        positionMs = positionMs,
-                        durationMs = durationMs,
-                        serverProfileId = profileId,
-                        serverUserId = userId,
-                    )
-                }
             }
         }
 
@@ -327,6 +326,10 @@ class EmbyViewModel(
     ) {
         val activeSession = session ?: return
         val repository = repository ?: return
+        persistLocalPlaybackProgressIfNeeded(
+            state = state,
+            eventName = eventName,
+        )
         viewModelScope.launch {
             runCatching {
                 repository.reportPlaybackProgress(
@@ -1457,6 +1460,101 @@ class EmbyViewModel(
         }
     }
 
+    private fun persistLocalPlaybackProgressIfNeeded(
+        state: EmbyPlaybackSessionState,
+        eventName: String,
+    ) {
+        val profileId = activeServerProfileId?.takeIf { it.isNotBlank() } ?: return
+        val userId = session?.userId?.takeIf { it.isNotBlank() } ?: return
+        val playbackMedia = when (val current = _playbackState.value) {
+            is PlaybackUiState.Loading -> current.media
+            is PlaybackUiState.Ready -> current.media
+            else -> null
+        }?.let(::resolveMediaWithResume) ?: return
+
+        val positionMs = state.positionMs.coerceAtLeast(0L)
+        val durationMs = state.durationMs.coerceAtLeast(0L)
+        if (!shouldKeepResume(
+                positionMs = positionMs,
+                durationMs = durationMs,
+                isFolder = playbackMedia.isFolder,
+            )
+        ) {
+            return
+        }
+
+        val persistenceKey = buildString {
+            append(profileId)
+            append('|')
+            append(userId)
+            append('|')
+            append(resumeGroupingKey(playbackMedia))
+        }
+        val nowMs = SystemClock.elapsedRealtime()
+        val positionDeltaMs = kotlin.math.abs(positionMs - lastLocalResumePersistPositionMs)
+        val shouldPersist = when {
+            persistenceKey != lastLocalResumePersistKey -> true
+            eventName == "AppBackground" -> true
+            eventName == "TimeUpdate" ->
+                nowMs - lastLocalResumePersistAtMs >= LocalResumePersistThrottleMs ||
+                    positionDeltaMs >= LocalResumePersistMinPositionDeltaMs
+
+            eventName == "Pause" || eventName == "Unpause" ->
+                nowMs - lastLocalResumePersistAtMs >= LocalResumePersistMinPositionDeltaMs ||
+                    positionDeltaMs >= LocalResumePersistMinPositionDeltaMs
+
+            else -> false
+        }
+
+        if (!shouldPersist) {
+            return
+        }
+
+        lastLocalResumePersistKey = persistenceKey
+        lastLocalResumePersistAtMs = nowMs
+        lastLocalResumePersistPositionMs = positionMs
+        persistContinueWatchingSnapshot(
+            media = playbackMedia,
+            positionMs = positionMs,
+            durationMs = durationMs,
+            serverProfileId = profileId,
+            serverUserId = userId,
+        )
+    }
+
+    private fun persistContinueWatchingSnapshot(
+        media: MediaItem,
+        positionMs: Long,
+        durationMs: Long,
+        serverProfileId: String,
+        serverUserId: String,
+    ) {
+        applyOptimisticResumeUpdate(
+            media = media,
+            positionMs = positionMs,
+            durationMs = durationMs,
+            serverProfileId = serverProfileId,
+            serverUserId = serverUserId,
+        )
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                continueWatchingStore.update(
+                    media = media,
+                    positionMs = positionMs,
+                    durationMs = durationMs,
+                    serverProfileId = serverProfileId,
+                    serverUserId = serverUserId,
+                )
+            }.onFailure { throwable ->
+                Log.w(
+                    "AurePPlaybackSession",
+                    "persist resume failed itemId=${media.id}",
+                    throwable,
+                )
+            }
+        }
+    }
+
     private fun shouldKeepResume(
         positionMs: Long,
         durationMs: Long,
@@ -1470,9 +1568,9 @@ class EmbyViewModel(
     }
 
     private fun clearPlaybackPreparationCache() {
-        playbackSourceJobs.values.forEach { deferred ->
-            if (deferred.isActive) {
-                deferred.cancel()
+        playbackSourceJobs.values.forEach { request ->
+            if (request.deferred.isActive) {
+                request.deferred.cancel()
             }
         }
         playbackSourceJobs.clear()
@@ -1532,7 +1630,16 @@ class EmbyViewModel(
         }
 
         playbackSourceJobs[media.id]?.let { existing ->
-            return existing
+            when {
+                existing.deferred.isCompleted || existing.deferred.isCancelled -> {
+                    playbackSourceJobs.remove(media.id)
+                }
+                trigger == "open-player" && existing.trigger == "prefetch" -> {
+                    existing.deferred.cancel()
+                    playbackSourceJobs.remove(media.id)
+                }
+                else -> return existing.deferred
+            }
         }
 
         val deferred = viewModelScope.async(Dispatchers.IO) {
@@ -1560,10 +1667,13 @@ class EmbyViewModel(
                 }
             }
         }
-        playbackSourceJobs[media.id] = deferred
+        playbackSourceJobs[media.id] = PlaybackSourceJob(
+            trigger = trigger,
+            deferred = deferred,
+        )
         viewModelScope.launch {
             val result = runCatching { deferred.await() }.getOrNull()
-            if (playbackSourceJobs[media.id] === deferred) {
+            if (playbackSourceJobs[media.id]?.deferred === deferred) {
                 playbackSourceJobs.remove(media.id)
             }
             result?.onSuccess { source ->

@@ -69,8 +69,9 @@ val LIBRARY_SORT_MODES = listOf(
 fun normalizePlayerMode(value: String): String = when (value) {
     "ExoPlayer + mpv" -> PLAYER_MODE_COMPATIBILITY
     "ExoPlayer" -> PLAYER_MODE_STANDARD
-    "系统解码优先" -> PLAYER_MODE_SYSTEM
-    "系统直解优先" -> PLAYER_MODE_SYSTEM
+    // Migrate old Exo-first labels to the current VLC-first default strategy.
+    "系统解码优先" -> PLAYER_MODE_STANDARD
+    "系统直解优先" -> PLAYER_MODE_STANDARD
     PLAYER_MODE_COMPATIBILITY,
     PLAYER_MODE_STANDARD,
     PLAYER_MODE_SYSTEM,

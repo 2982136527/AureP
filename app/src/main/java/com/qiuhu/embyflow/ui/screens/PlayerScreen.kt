@@ -12,6 +12,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
+import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -57,6 +58,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AspectRatio
+import androidx.compose.material.icons.rounded.Audiotrack
 import androidx.compose.material.icons.rounded.Brightness6
 import androidx.compose.material.icons.rounded.FastForward
 import androidx.compose.material.icons.rounded.FastRewind
@@ -106,10 +108,15 @@ import coil.compose.AsyncImage
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
 import androidx.media3.common.MediaItem as PlayerMediaItem
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -119,11 +126,16 @@ import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.DataSpec
-import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.StatsDataSource
+import androidx.media3.datasource.cronet.CronetDataSource
+import androidx.media3.datasource.cronet.CronetUtil
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import com.qiuhu.embyflow.BuildConfig
+import com.qiuhu.embyflow.data.emby.EmbyAudioTrack
 import com.qiuhu.embyflow.data.emby.EmbyPlaybackInfoField
 import com.qiuhu.embyflow.data.emby.EmbyPlaybackSessionState
 import com.qiuhu.embyflow.data.emby.EmbyPlaybackSource
@@ -143,6 +155,7 @@ import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_KOREAN
 import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_SIMPLIFIED_CHINESE
 import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_TRADITIONAL_CHINESE
 import com.qiuhu.embyflow.ui.theme.AppTitleFontFamily
+import `is`.xyz.mpv.MPVLib
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
@@ -154,11 +167,99 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.chromium.net.CronetEngine
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 private val PlayerAccentColor = Color(0xFFF0E7DA)
 private val PlayerPanelColor = Color(0xCC101010)
 private const val PlayerDebugTag = "AurePPlayer"
+private const val DualBackendExoCompanionDelayFastMs = 1_400L
+private const val DualBackendExoCompanionDelayBalancedMs = 1_800L
+private const val DualBackendExoCompanionDelayCompatibilityMs = 2_400L
+
+private object PlaybackBackendMemory {
+    private val rememberedBackends = linkedMapOf<String, PlayerBackendKind>()
+
+    @Synchronized
+    fun get(key: String): PlayerBackendKind? = rememberedBackends[key]
+
+    @Synchronized
+    fun remember(key: String, backend: PlayerBackendKind) {
+        rememberedBackends[key] = backend
+        while (rememberedBackends.size > 160) {
+            val oldestKey = rememberedBackends.entries.firstOrNull()?.key ?: break
+            rememberedBackends.remove(oldestKey)
+        }
+    }
+
+    @Synchronized
+    fun forget(key: String, backend: PlayerBackendKind) {
+        if (rememberedBackends[key] == backend) {
+            rememberedBackends.remove(key)
+        }
+    }
+}
+
+private object PlayerHttpDataSourceFactoryProvider {
+    private const val NetworkTimeoutMs = 30_000
+    private val cronetExecutor = Executors.newCachedThreadPool()
+
+    @Volatile
+    private var cronetEngine: CronetEngine? = null
+
+    @Volatile
+    private var cronetBuildAttempted: Boolean = false
+
+    fun create(
+        context: Context,
+        requestHeaders: Map<String, String>,
+    ): HttpDataSource.Factory {
+        val normalizedHeaders = requestHeaders
+            .mapKeys { (name, _) -> name.trim() }
+            .filter { (name, value) -> name.isNotBlank() && value.isNotBlank() }
+
+        val fallbackFactory = DefaultHttpDataSource.Factory()
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(NetworkTimeoutMs)
+            .setReadTimeoutMs(NetworkTimeoutMs)
+            .setUserAgent(playerHttpUserAgent())
+            .setDefaultRequestProperties(normalizedHeaders)
+
+        val activeCronetEngine = getCronetEngine(context.applicationContext) ?: return fallbackFactory
+
+        return CronetDataSource.Factory(activeCronetEngine, cronetExecutor)
+            .setUserAgent(playerHttpUserAgent())
+            .setConnectionTimeoutMs(NetworkTimeoutMs)
+            .setReadTimeoutMs(NetworkTimeoutMs)
+            .setResetTimeoutOnRedirects(true)
+            .setDefaultRequestProperties(normalizedHeaders)
+            .setFallbackFactory(fallbackFactory)
+    }
+
+    @Synchronized
+    private fun getCronetEngine(context: Context): CronetEngine? {
+        if (cronetBuildAttempted) {
+            return cronetEngine
+        }
+        cronetBuildAttempted = true
+        cronetEngine = runCatching {
+            CronetUtil.buildCronetEngine(
+                context,
+                playerHttpUserAgent(),
+                false,
+            )
+        }.getOrNull()
+        if (cronetEngine != null) {
+            Log.i(PlayerDebugTag, "Cronet engine enabled for Exo data source")
+        } else {
+            Log.w(PlayerDebugTag, "Cronet unavailable, fallback to default Exo HTTP stack")
+        }
+        return cronetEngine
+    }
+}
+
+private fun playerHttpUserAgent(): String = "AureP/${BuildConfig.VERSION_NAME} (Android)"
 
 private sealed interface RedirectProbeState {
     data object Idle : RedirectProbeState
@@ -195,6 +296,7 @@ fun PlayerScreen(
     onClose: (Long, Long) -> Unit,
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val configuration = LocalConfiguration.current
     val isLandscapeLayout = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val density = LocalDensity.current
@@ -231,18 +333,30 @@ fun PlayerScreen(
     val runtimeProfile = remember(settings.playerMode) {
         settings.toPlayerRuntimeProfile()
     }
-    val availableSubtitleTracks = remember(source.subtitleTracks) {
-        source.subtitleTracks
+    val mpvAvailable = remember { MPVLib.isAvailable }
+    val sourceAudioTracks = remember(source.audioTracks) {
+        source.audioTracks.map { it.toPlayerAudioTrack() }
     }
-    val autoSubtitleTracks = remember(
-        availableSubtitleTracks,
-        settings.embeddedSubtitleLanguage,
-        settings.externalSubtitleLanguage,
-    ) {
-        availableSubtitleTracks.resolveAutomaticSubtitleSelection(
-            embeddedLanguagePreference = settings.embeddedSubtitleLanguage,
-            externalLanguagePreference = settings.externalSubtitleLanguage,
-        )
+    val sourceSubtitleTracks = remember(source.subtitleTracks) {
+        source.subtitleTracks.map { it.toPlayerSubtitleTrack() }
+    }
+    var vlcRuntimeAudioTracks by remember(mediaId) {
+        mutableStateOf(emptyList<VlcRuntimeAudioTrack>())
+    }
+    var vlcRuntimeSubtitleTracks by remember(mediaId) {
+        mutableStateOf(emptyList<VlcRuntimeSubtitleTrack>())
+    }
+    var mpvRuntimeAudioTracks by remember(mediaId) {
+        mutableStateOf(emptyList<MpvRuntimeAudioTrack>())
+    }
+    var mpvRuntimeSubtitleTracks by remember(mediaId) {
+        mutableStateOf(emptyList<MpvRuntimeSubtitleTrack>())
+    }
+    var exoRuntimeAudioTracks by remember(mediaId) {
+        mutableStateOf(emptyList<ExoRuntimeAudioTrack>())
+    }
+    var exoRuntimeSubtitleTracks by remember(mediaId) {
+        mutableStateOf(emptyList<ExoRuntimeSubtitleTrack>())
     }
     val streamOptions = remember(source.streamOptions, source.streamUrl) {
         if (source.streamOptions.isNotEmpty()) {
@@ -259,8 +373,11 @@ fun PlayerScreen(
             )
         }
     }
-    var selectedSubtitleIndex by rememberSaveable {
-        mutableStateOf<Int?>(null)
+    var selectedSubtitleKey by rememberSaveable(mediaId) {
+        mutableStateOf<String?>(null)
+    }
+    var selectedAudioKey by rememberSaveable(mediaId) {
+        mutableStateOf<String?>(null)
     }
     var selectedStreamOptionId by rememberSaveable(source.selectedStreamOptionId, source.streamUrl) {
         mutableStateOf(source.selectedStreamOptionId ?: streamOptions.firstOrNull()?.id)
@@ -287,6 +404,9 @@ fun PlayerScreen(
         mutableStateOf(false)
     }
     var showSubtitleSheet by rememberSaveable {
+        mutableStateOf(false)
+    }
+    var showAudioSheet by rememberSaveable {
         mutableStateOf(false)
     }
     var resumePositionMs by rememberSaveable(mediaId) {
@@ -340,6 +460,15 @@ fun PlayerScreen(
     var forceVlcCompatibilityBackend by rememberSaveable(mediaId) {
         mutableStateOf(false)
     }
+    var forceExoStandardBackend by rememberSaveable(mediaId) {
+        mutableStateOf(false)
+    }
+    var forceMpvBackend by rememberSaveable(mediaId) {
+        mutableStateOf(false)
+    }
+    var attemptedBackendKinds by rememberSaveable(mediaId) {
+        mutableStateOf<Set<String>>(emptySet())
+    }
     var compatibilityPlaybackUrl by remember(mediaId) {
         mutableStateOf<String?>(null)
     }
@@ -355,6 +484,23 @@ fun PlayerScreen(
     }
     val activeStreamOption = remember(streamOptions, selectedStreamOptionId) {
         streamOptions.firstOrNull { it.id == selectedStreamOptionId } ?: streamOptions.first()
+    }
+    LaunchedEffect(mpvAvailable) {
+        if (!mpvAvailable) {
+            Log.w(
+                PlayerDebugTag,
+                "libmpv unavailable, fallback to remaining backends reason=${MPVLib.loadErrorMessage.orEmpty()}",
+            )
+        }
+    }
+    LaunchedEffect(mediaId, activeStreamOption.id) {
+        vlcRuntimeSubtitleTracks = emptyList()
+        vlcRuntimeAudioTracks = emptyList()
+        mpvRuntimeSubtitleTracks = emptyList()
+        mpvRuntimeAudioTracks = emptyList()
+        exoRuntimeSubtitleTracks = emptyList()
+        exoRuntimeAudioTracks = emptyList()
+        attemptedBackendKinds = emptySet()
     }
     var redirectProbeState by remember(activeStreamOption.id, activeStreamOption.streamUrl) {
         mutableStateOf<RedirectProbeState>(RedirectProbeState.Idle)
@@ -377,70 +523,139 @@ fun PlayerScreen(
         mutableStateOf(false)
     }
 
-    val activeSubtitleTracks = remember(availableSubtitleTracks, autoSubtitleTracks, selectedSubtitleIndex) {
-        when (selectedSubtitleIndex) {
-            null -> autoSubtitleTracks
-            SUBTITLE_OFF -> emptyList()
-            else -> availableSubtitleTracks
-                .filter { it.index == selectedSubtitleIndex }
-                .map { it.copy(isDefault = true) }
-        }
-    }
-    val subtitleChoiceLabel = remember(availableSubtitleTracks, autoSubtitleTracks, selectedSubtitleIndex) {
-        formatSubtitleChoiceLabel(
-            selectedSubtitleIndex = selectedSubtitleIndex,
-            sourceTracks = availableSubtitleTracks,
-            autoTracks = autoSubtitleTracks,
-        )
-    }
     val streamChoiceLabel = remember(activeStreamOption) {
         activeStreamOption.label
     }
-    val sourceContainer = remember(source.infoFields) {
-        source.infoFields.firstOrNull { it.label == "封装" }?.value.orEmpty()
+    val sourceContainer = remember(source.container, source.infoFields) {
+        source.container?.takeIf { it.isNotBlank() }
+            ?: source.infoFields.firstOrNull { it.label == "封装" }?.value.orEmpty()
     }
-    val sourceVideoCodec = remember(source.infoFields) {
-        source.infoFields.firstOrNull { it.label == "视频编码" }?.value.orEmpty()
+    val sourceVideoCodec = remember(source.videoCodec, source.infoFields) {
+        source.videoCodec?.takeIf { it.isNotBlank() }
+            ?: source.infoFields.firstOrNull { it.label == "视频编码" }?.value.orEmpty()
     }
-    val sourceAudioCodec = remember(source.infoFields) {
-        source.infoFields.firstOrNull { it.label == "音频编码" }?.value.orEmpty()
+    val sourceAudioCodec = remember(source.audioCodec, source.infoFields) {
+        source.audioCodec?.takeIf { it.isNotBlank() }
+            ?: source.infoFields.firstOrNull { it.label == "音频编码" }?.value.orEmpty()
     }
-    val sourceRequiresCompatibilityBackend = remember(
+    val sourceVideoRange = remember(source.videoRange) {
+        source.videoRange.orEmpty()
+    }
+    val sourceExtendedVideoType = remember(source.extendedVideoType) {
+        source.extendedVideoType.orEmpty()
+    }
+    val sourceLegacyCompatibilityRisk = remember(
         sourceContainer,
         sourceVideoCodec,
-        activeStreamOption.id,
-        activeStreamOption.streamUrl,
-        source.infoLine,
     ) {
         shouldPreferCompatibilityBackend(
             container = sourceContainer,
             videoCodec = sourceVideoCodec,
-        ) || shouldPreferCompatibilityBackendForStreamOption(
+        )
+    }
+    val sourceCompatibilityStreamHint = remember(
+        activeStreamOption.id,
+        activeStreamOption.streamUrl,
+        source.infoLine,
+    ) {
+        shouldPreferCompatibilityBackendForStreamOption(
             optionId = activeStreamOption.id,
             streamUrl = activeStreamOption.streamUrl,
             infoLine = source.infoLine,
         )
     }
-    val preferredBackendKind = if (
-        forceVlcCompatibilityBackend ||
-        runtimeProfile.backendKind == PlayerBackendKind.Vlc ||
-        sourceRequiresCompatibilityBackend
+    val sourceRequiresCompatibilityBackend = sourceLegacyCompatibilityRisk || sourceCompatibilityStreamHint
+    val sourceHdrCompatibilityRisk = remember(
+        sourceVideoRange,
+        sourceExtendedVideoType,
+        source.bitDepth,
+        source.title,
+        title,
+        source.infoLine,
+        activeStreamOption.streamUrl,
     ) {
-        PlayerBackendKind.Vlc
-    } else {
-        PlayerBackendKind.Exo
+        shouldPreferMpvBackend(
+            videoRange = sourceVideoRange,
+            extendedVideoType = sourceExtendedVideoType,
+            bitDepth = source.bitDepth,
+            title = listOf(source.title, title, source.infoLine, activeStreamOption.streamUrl)
+                .joinToString(separator = " "),
+        )
+    }
+    val mpvHwdecOption = remember(sourceHdrCompatibilityRisk) {
+        buildMpvHwdecOption(
+            hdrRisk = sourceHdrCompatibilityRisk,
+        )
+    }
+    val mpvEnableHdrToneMapping = remember(sourceHdrCompatibilityRisk) {
+        sourceHdrCompatibilityRisk
+    }
+    val backendMemoryKey = remember(
+        source.mediaSourceId,
+        activeStreamOption.id,
+        sourceContainer,
+        sourceVideoCodec,
+        sourceAudioCodec,
+    ) {
+        buildBackendMemoryKey(
+            mediaSourceId = source.mediaSourceId,
+            streamOptionId = activeStreamOption.id,
+            container = sourceContainer,
+            videoCodec = sourceVideoCodec,
+            audioCodec = sourceAudioCodec,
+        )
+    }
+    val rememberedBackendKind = PlaybackBackendMemory.get(backendMemoryKey)
+    val automaticBackendOrder = remember(
+        runtimeProfile.label,
+        mpvAvailable,
+        sourceLegacyCompatibilityRisk,
+        sourceHdrCompatibilityRisk,
+        sourceContainer,
+        sourceVideoCodec,
+        sourceAudioCodec,
+        source.isRemote,
+        source.infoLine,
+    ) {
+        buildAutomaticBackendOrder(
+            runtimeMode = runtimeProfile.label,
+            legacyRisk = sourceLegacyCompatibilityRisk,
+            hdrRisk = sourceHdrCompatibilityRisk,
+            container = sourceContainer,
+            videoCodec = sourceVideoCodec,
+            audioCodec = sourceAudioCodec,
+            isRemote = source.isRemote,
+            infoLine = source.infoLine,
+        ).filterAvailableBackends(mpvAvailable)
+    }
+    val preferredBackendKind = when {
+        forceVlcCompatibilityBackend -> PlayerBackendKind.Vlc
+        forceExoStandardBackend -> PlayerBackendKind.Exo
+        forceMpvBackend && mpvAvailable -> PlayerBackendKind.Mpv
+        rememberedBackendKind == PlayerBackendKind.Mpv && !mpvAvailable -> automaticBackendOrder.first()
+        rememberedBackendKind == PlayerBackendKind.Mpv && sourceHdrCompatibilityRisk -> automaticBackendOrder.first()
+        rememberedBackendKind == PlayerBackendKind.Exo && sourceHdrCompatibilityRisk -> automaticBackendOrder.first()
+        rememberedBackendKind != null -> rememberedBackendKind
+        else -> automaticBackendOrder.first()
     }
     val experimentalDualBackendRace = remember(
-        settings.experimentalDualBackendRace,
         forceVlcCompatibilityBackend,
+        forceExoStandardBackend,
+        forceMpvBackend,
+        preferredBackendKind,
+        runtimeProfile.label,
+        sourceHdrCompatibilityRisk,
         sourceContainer,
         sourceVideoCodec,
         sourceAudioCodec,
         source.infoLine,
     ) {
-        settings.experimentalDualBackendRace &&
-            !forceVlcCompatibilityBackend &&
-            !sourceRequiresCompatibilityBackend &&
+        !forceVlcCompatibilityBackend &&
+            !forceExoStandardBackend &&
+            !forceMpvBackend &&
+            preferredBackendKind == PlayerBackendKind.Vlc &&
+            !sourceHdrCompatibilityRisk &&
+            runtimeProfile.label != PLAYER_MODE_SYSTEM &&
             shouldUseDualBackendRace(
                 container = sourceContainer,
                 videoCodec = sourceVideoCodec,
@@ -448,13 +663,34 @@ fun PlayerScreen(
                 infoLine = source.infoLine,
             )
     }
+    val exoCompanionDelayMs = remember(runtimeProfile.label) {
+        companionArmDelayMs(runtimeProfile.label)
+    }
+    val initialBackendKind = if (experimentalDualBackendRace) {
+        PlayerBackendKind.Vlc
+    } else {
+        preferredBackendKind
+    }
+    var exoCompanionArmed by rememberSaveable(
+        mediaId,
+        activeStreamOption.id,
+        experimentalDualBackendRace,
+        preferredBackendKind.name,
+    ) {
+        mutableStateOf(!experimentalDualBackendRace && preferredBackendKind == PlayerBackendKind.Exo)
+    }
+    val shouldCreateExoPlayer = when {
+        experimentalDualBackendRace -> exoCompanionArmed
+        preferredBackendKind == PlayerBackendKind.Exo -> true
+        else -> false
+    }
     var activeBackendKindName by rememberSaveable(
         mediaId,
         activeStreamOption.id,
-        preferredBackendKind.name,
+        initialBackendKind.name,
         experimentalDualBackendRace,
     ) {
-        mutableStateOf(preferredBackendKind.name)
+        mutableStateOf(initialBackendKind.name)
     }
     var raceResolved by rememberSaveable(
         mediaId,
@@ -469,16 +705,121 @@ fun PlayerScreen(
     var vlcFirstFrameAtMs by remember(activeStreamOption.id) {
         mutableLongStateOf(0L)
     }
+    var mpvFirstFrameAtMs by remember(activeStreamOption.id) {
+        mutableLongStateOf(0L)
+    }
     val activeBackendKind = remember(activeBackendKindName) {
         PlayerBackendKind.valueOf(activeBackendKindName)
     }
     val activeBackendLabel = remember(activeBackendKind) {
         when (activeBackendKind) {
             PlayerBackendKind.Exo -> "Exo"
+            PlayerBackendKind.Mpv -> "MPV"
             PlayerBackendKind.Vlc -> "VLC"
         }
     }
     val raceInProgress = experimentalDualBackendRace && !raceResolved
+    val runtimeSubtitleTracks = remember(
+        activeBackendKind,
+        vlcRuntimeSubtitleTracks,
+        mpvRuntimeSubtitleTracks,
+        exoRuntimeSubtitleTracks,
+    ) {
+        when (activeBackendKind) {
+            PlayerBackendKind.Vlc -> vlcRuntimeSubtitleTracks.map { it.toPlayerSubtitleTrack() }
+            PlayerBackendKind.Mpv -> mpvRuntimeSubtitleTracks.map { it.toPlayerSubtitleTrack() }
+            PlayerBackendKind.Exo -> exoRuntimeSubtitleTracks.map { it.toPlayerSubtitleTrack() }
+        }
+    }
+    val runtimeAudioTracks = remember(
+        activeBackendKind,
+        vlcRuntimeAudioTracks,
+        mpvRuntimeAudioTracks,
+        exoRuntimeAudioTracks,
+    ) {
+        when (activeBackendKind) {
+            PlayerBackendKind.Vlc -> vlcRuntimeAudioTracks.map { it.toPlayerAudioTrack() }
+            PlayerBackendKind.Mpv -> mpvRuntimeAudioTracks.map { it.toPlayerAudioTrack() }
+            PlayerBackendKind.Exo -> exoRuntimeAudioTracks.map { it.toPlayerAudioTrack() }
+        }
+    }
+    val availableSubtitleTracks = remember(sourceSubtitleTracks, runtimeSubtitleTracks) {
+        mergeSubtitleTracks(
+            sourceTracks = sourceSubtitleTracks,
+            runtimeTracks = runtimeSubtitleTracks,
+        )
+    }
+    val availableAudioTracks = remember(sourceAudioTracks, runtimeAudioTracks) {
+        mergeAudioTracks(
+            sourceTracks = sourceAudioTracks,
+            runtimeTracks = runtimeAudioTracks,
+        )
+    }
+    val autoSubtitleTracks = remember(
+        availableSubtitleTracks,
+        settings.embeddedSubtitleLanguage,
+        settings.externalSubtitleLanguage,
+    ) {
+        availableSubtitleTracks.resolveAutomaticSubtitleSelection(
+            embeddedLanguagePreference = settings.embeddedSubtitleLanguage,
+            externalLanguagePreference = settings.externalSubtitleLanguage,
+        )
+    }
+    val autoAudioTracks = remember(availableAudioTracks) {
+        availableAudioTracks.resolveAutomaticAudioSelection()
+    }
+    val activeSubtitleTracks = remember(availableSubtitleTracks, autoSubtitleTracks, selectedSubtitleKey) {
+        when (selectedSubtitleKey) {
+            null -> autoSubtitleTracks
+            SUBTITLE_OFF -> emptyList()
+            else -> availableSubtitleTracks
+                .filter { it.key == selectedSubtitleKey }
+                .map { it.copy(isDefault = true) }
+        }
+    }
+    val activeAudioTrack = remember(availableAudioTracks, autoAudioTracks, selectedAudioKey) {
+        when (selectedAudioKey) {
+            null -> autoAudioTracks.firstOrNull()
+            else -> availableAudioTracks.firstOrNull { it.key == selectedAudioKey }
+        }
+    }
+    val sourceExternalSubtitleTracks = remember(sourceSubtitleTracks) {
+        sourceSubtitleTracks.filter { it.isExternal && !it.url.isNullOrBlank() && !it.mimeType.isNullOrBlank() }
+    }
+    val audioChoiceLabel = remember(availableAudioTracks, autoAudioTracks, selectedAudioKey) {
+        formatAudioChoiceLabel(
+            selectedAudioKey = selectedAudioKey,
+            sourceTracks = availableAudioTracks,
+            autoTracks = autoAudioTracks,
+        )
+    }
+    val vlcExternalSubtitleTracks = remember(sourceExternalSubtitleTracks) {
+        sourceExternalSubtitleTracks.mapNotNull { track ->
+            val url = track.url ?: return@mapNotNull null
+            VlcExternalSubtitleTrack(
+                label = track.label,
+                url = url,
+                isDefault = track.isDefault,
+            )
+        }
+    }
+    val mpvExternalSubtitleTracks = remember(sourceExternalSubtitleTracks) {
+        sourceExternalSubtitleTracks.mapNotNull { track ->
+            val url = track.url ?: return@mapNotNull null
+            MpvExternalSubtitleTrack(
+                label = track.label,
+                url = url,
+                isDefault = track.isDefault,
+            )
+        }
+    }
+    val subtitleChoiceLabel = remember(availableSubtitleTracks, autoSubtitleTracks, selectedSubtitleKey) {
+        formatSubtitleChoiceLabel(
+            selectedSubtitleKey = selectedSubtitleKey,
+            sourceTracks = availableSubtitleTracks,
+            autoTracks = autoSubtitleTracks,
+        )
+    }
     val vlcForceSoftwareDecode = remember(
         sourceContainer,
         sourceVideoCodec,
@@ -505,6 +846,7 @@ fun PlayerScreen(
             raceResolved = true
             hasRenderedFirstFrame = when (backendKind) {
                 PlayerBackendKind.Exo -> exoFirstFrameAtMs > 0L
+                PlayerBackendKind.Mpv -> false
                 PlayerBackendKind.Vlc -> vlcFirstFrameAtMs > 0L
             }
             bitrateEstimateBitsPerSecond = 0L
@@ -516,6 +858,12 @@ fun PlayerScreen(
             PlayerBackendKind.Exo -> {
                 if (exoFirstFrameAtMs == 0L) {
                     exoFirstFrameAtMs = nowMs
+                }
+            }
+
+            PlayerBackendKind.Mpv -> {
+                if (mpvFirstFrameAtMs == 0L) {
+                    mpvFirstFrameAtMs = nowMs
                 }
             }
 
@@ -535,12 +883,14 @@ fun PlayerScreen(
                 else -> null
             }
             if (winner != null) {
+                PlaybackBackendMemory.remember(backendMemoryKey, winner)
                 promoteRaceBackend(
                     winner,
                     renderTimeMs?.let { "first-frame-$it" } ?: "first-frame",
                 )
             }
         } else if (activeBackendKind == backendKind) {
+            PlaybackBackendMemory.remember(backendMemoryKey, backendKind)
             hasRenderedFirstFrame = true
             isBuffering = false
         }
@@ -558,19 +908,20 @@ fun PlayerScreen(
     }
     val mediaItem = remember(
         activeStreamOption.streamUrl,
-        activeSubtitleTracks,
-        preferredBackendKind,
-        experimentalDualBackendRace,
+        sourceExternalSubtitleTracks,
+        shouldCreateExoPlayer,
     ) {
-        if (preferredBackendKind == PlayerBackendKind.Vlc && !experimentalDualBackendRace) {
+        if (!shouldCreateExoPlayer) {
             null
         } else {
             PlayerMediaItem.Builder()
                 .setUri(activeStreamOption.streamUrl)
                 .setSubtitleConfigurations(
-                    activeSubtitleTracks.map { subtitle ->
-                        PlayerMediaItem.SubtitleConfiguration.Builder(Uri.parse(subtitle.url))
-                            .setMimeType(subtitle.mimeType)
+                    sourceExternalSubtitleTracks.mapNotNull { subtitle ->
+                        val subtitleUrl = subtitle.url ?: return@mapNotNull null
+                        val mimeType = subtitle.mimeType ?: return@mapNotNull null
+                        PlayerMediaItem.SubtitleConfiguration.Builder(Uri.parse(subtitleUrl))
+                            .setMimeType(mimeType)
                             .setLanguage(subtitle.language)
                             .setLabel(subtitle.label)
                             .setSelectionFlags(if (subtitle.isDefault) C.SELECTION_FLAG_DEFAULT else 0)
@@ -580,7 +931,7 @@ fun PlayerScreen(
                 .build()
         }
     }
-    val exoPlayer = if (preferredBackendKind == PlayerBackendKind.Vlc && !experimentalDualBackendRace) {
+    val exoPlayer = if (!shouldCreateExoPlayer) {
         null
     } else {
         remember(
@@ -589,6 +940,7 @@ fun PlayerScreen(
             runtimeProfile,
             activeStreamOption.requestHeaders,
             experimentalDualBackendRace,
+            exoCompanionArmed,
         ) {
             val renderersFactory = DefaultRenderersFactory(context)
                 .setEnableDecoderFallback(runtimeProfile.decoderFallback)
@@ -600,15 +952,10 @@ fun PlayerScreen(
                     runtimeProfile.bufferForPlaybackAfterRebufferMs,
                 )
                 .build()
-            val okHttpClient = OkHttpClient.Builder()
-                .retryOnConnectionFailure(true)
-                .followRedirects(true)
-                .followSslRedirects(true)
-                .connectTimeout(30, TimeUnit.SECONDS)
-                .readTimeout(30, TimeUnit.SECONDS)
-                .build()
-            val httpDataSourceFactory = OkHttpDataSource.Factory(okHttpClient)
-                .setDefaultRequestProperties(activeStreamOption.requestHeaders)
+            val httpDataSourceFactory = PlayerHttpDataSourceFactoryProvider.create(
+                context = context,
+                requestHeaders = activeStreamOption.requestHeaders,
+            )
             val trackingDataSourceFactory = TrackingDataSourceFactory(
                 upstream = httpDataSourceFactory,
                 tracker = playbackTrafficTracker,
@@ -645,6 +992,58 @@ fun PlayerScreen(
             }
         }
     }
+    val mpvPlaybackUrl = remember(
+        activeStreamOption.id,
+        activeStreamOption.streamUrl,
+        resolvedPlaybackUrl,
+    ) {
+        resolvedPlaybackUrl.takeIf { it.isNotBlank() } ?: activeStreamOption.streamUrl
+    }
+    val mpvPlayer = if (preferredBackendKind == PlayerBackendKind.Mpv && mpvAvailable) {
+        remember(
+            context,
+            mpvPlaybackUrl,
+            mpvExternalSubtitleTracks,
+            activeStreamOption.requestHeaders,
+            mpvHwdecOption,
+            mpvEnableHdrToneMapping,
+        ) {
+            MpvPlayerSession(
+                context = context,
+                streamUrl = mpvPlaybackUrl,
+                subtitleTracks = mpvExternalSubtitleTracks,
+                onSubtitleTracksChanged = { tracks, selectedTrackId ->
+                    mainHandler.post {
+                        mpvRuntimeSubtitleTracks = tracks
+                        if (selectedSubtitleKey == null && selectedTrackId != null) {
+                            // keep automatic selection in sync
+                        }
+                    }
+                },
+                onAudioTracksChanged = { tracks, _ ->
+                    mainHandler.post {
+                        mpvRuntimeAudioTracks = tracks
+                    }
+                },
+                requestHeaders = activeStreamOption.requestHeaders,
+                hwdecOption = mpvHwdecOption,
+                enableHdrToneMapping = mpvEnableHdrToneMapping,
+                startPositionMs = resumePositionMs,
+                playWhenReady = resumePlayWhenReady,
+                initialVolume = 100,
+                initialPlaybackSpeed = playbackSpeed,
+                seekBackMs = runtimeProfile.seekBackMs,
+                seekForwardMs = runtimeProfile.seekForwardMs,
+                onFirstFrameRendered = {
+                    mainHandler.post {
+                        registerBackendFirstFrame(PlayerBackendKind.Mpv, null)
+                    }
+                },
+            )
+        }
+    } else {
+        null
+    }
     val vlcPlaybackUrl = remember(
         activeStreamOption.id,
         activeStreamOption.streamUrl,
@@ -656,17 +1055,28 @@ fun PlayerScreen(
         remember(
             context,
             vlcPlaybackUrl,
-            activeSubtitleTracks,
+            vlcExternalSubtitleTracks,
             activeStreamOption.requestHeaders,
-            resumePositionMs,
-            resumePlayWhenReady,
-            playbackSpeed,
             experimentalDualBackendRace,
+            vlcForceSoftwareDecode,
         ) {
             VlcPlayerSession(
                 context = context,
                 streamUrl = vlcPlaybackUrl,
-                subtitleTracks = activeSubtitleTracks,
+                subtitleTracks = vlcExternalSubtitleTracks,
+                onSubtitleTracksChanged = { tracks, selectedTrackId ->
+                    mainHandler.post {
+                        vlcRuntimeSubtitleTracks = tracks
+                        if (selectedSubtitleKey == null && selectedTrackId != null) {
+                            // Keep the runtime-selected track in sync when VLC auto-selects one.
+                        }
+                    }
+                },
+                onAudioTracksChanged = { tracks, _ ->
+                    mainHandler.post {
+                        vlcRuntimeAudioTracks = tracks
+                    }
+                },
                 requestHeaders = activeStreamOption.requestHeaders,
                 forceSoftwareDecode = vlcForceSoftwareDecode,
                 startPositionMs = resumePositionMs,
@@ -687,31 +1097,43 @@ fun PlayerScreen(
     }
 
     fun currentPositionSnapshot(): Long = when (activeBackendKind) {
+        PlayerBackendKind.Mpv -> mpvPlayer?.currentPositionMs?.coerceAtLeast(0L) ?: 0L
         PlayerBackendKind.Vlc -> vlcPlayer?.currentPositionMs?.coerceAtLeast(0L) ?: 0L
         PlayerBackendKind.Exo -> exoPlayer?.currentPosition?.coerceAtLeast(0L) ?: 0L
     }
 
     fun durationSnapshot(): Long = when (activeBackendKind) {
+        PlayerBackendKind.Mpv -> mpvPlayer?.durationMs?.coerceAtLeast(0L) ?: 0L
         PlayerBackendKind.Vlc -> vlcPlayer?.durationMs?.coerceAtLeast(0L) ?: 0L
         PlayerBackendKind.Exo -> exoPlayer?.duration?.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0L) ?: 0L
     }
 
     fun bufferedPositionSnapshot(): Long = when (activeBackendKind) {
+        PlayerBackendKind.Mpv -> mpvPlayer?.bufferedPositionMs?.coerceAtLeast(0L) ?: 0L
         PlayerBackendKind.Vlc -> vlcPlayer?.bufferedPositionMs?.coerceAtLeast(0L) ?: 0L
         PlayerBackendKind.Exo -> exoPlayer?.bufferedPosition?.coerceAtLeast(0L) ?: 0L
     }
 
     fun isPlayingSnapshot(): Boolean = when (activeBackendKind) {
+        PlayerBackendKind.Mpv -> mpvPlayer?.isPlaying ?: false
         PlayerBackendKind.Vlc -> vlcPlayer?.isPlaying ?: false
         PlayerBackendKind.Exo -> exoPlayer?.isPlaying ?: false
     }
 
     fun isBufferingSnapshot(): Boolean = when (activeBackendKind) {
+        PlayerBackendKind.Mpv -> mpvPlayer?.isBuffering ?: false
         PlayerBackendKind.Vlc -> vlcPlayer?.isBuffering ?: false
         PlayerBackendKind.Exo -> exoPlayer?.playbackState == Player.STATE_BUFFERING
     }
 
     fun playbackStateSnapshot(): Int = when (activeBackendKind) {
+        PlayerBackendKind.Mpv -> when {
+            mpvPlayer?.isEnded == true -> Player.STATE_ENDED
+            mpvPlayer?.isBuffering == true -> Player.STATE_BUFFERING
+            mpvPlayer?.isPlaying == true -> Player.STATE_READY
+            else -> Player.STATE_IDLE
+        }
+
         PlayerBackendKind.Vlc -> when {
             vlcPlayer?.isEnded == true -> Player.STATE_ENDED
             vlcPlayer?.isBuffering == true -> Player.STATE_BUFFERING
@@ -726,6 +1148,7 @@ fun PlayerScreen(
         (exoPlayer?.playWhenReady ?: false) || (vlcPlayer?.playWhenReadyRequested ?: false)
     } else {
         when (activeBackendKind) {
+            PlayerBackendKind.Mpv -> mpvPlayer?.playWhenReadyRequested ?: resumePlayWhenReady
             PlayerBackendKind.Vlc -> vlcPlayer?.playWhenReadyRequested ?: resumePlayWhenReady
             PlayerBackendKind.Exo -> exoPlayer?.playWhenReady ?: resumePlayWhenReady
         }
@@ -733,10 +1156,15 @@ fun PlayerScreen(
 
     fun currentPlaybackSpeedTarget(): Float = playbackSpeed
 
-    fun currentSubtitleStreamIndex(): Int? = when (selectedSubtitleIndex) {
-        null -> autoSubtitleTracks.firstOrNull()?.index
+    fun currentSubtitleStreamIndex(): Int? = when (selectedSubtitleKey) {
+        null -> autoSubtitleTracks.firstOrNull()?.serverIndex
         SUBTITLE_OFF -> null
-        else -> selectedSubtitleIndex
+        else -> availableSubtitleTracks.firstOrNull { it.key == selectedSubtitleKey }?.serverIndex
+    }
+
+    fun currentAudioStreamIndex(): Int? = when (selectedAudioKey) {
+        null -> autoAudioTracks.firstOrNull()?.serverIndex
+        else -> availableAudioTracks.firstOrNull { it.key == selectedAudioKey }?.serverIndex
     }
 
     fun currentPlayMethod(): String = "DirectStream"
@@ -759,6 +1187,7 @@ fun PlayerScreen(
             isPaused = !isPlayingSnapshot(),
             playbackRate = playbackSpeed.toDouble(),
             subtitleStreamIndex = currentSubtitleStreamIndex(),
+            audioStreamIndex = currentAudioStreamIndex(),
             playMethod = currentPlayMethod(),
         )
     }
@@ -777,6 +1206,18 @@ fun PlayerScreen(
         if (!playbackStartedReported || playbackStoppedReported) return
         buildPlaybackSessionState(positionOverrideMs)?.let { state ->
             onPlaybackProgress(state, eventName)
+        }
+    }
+
+    DisposableEffect(lifecycleOwner, mediaId, source.mediaSourceId, source.playSessionId) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                reportPlaybackProgressEvent("AppBackground")
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 
@@ -805,6 +1246,7 @@ fun PlayerScreen(
             vlcPlayer?.seekTo(positionMs)
         } else {
             when (activeBackendKind) {
+                PlayerBackendKind.Mpv -> mpvPlayer?.seekTo(positionMs)
                 PlayerBackendKind.Vlc -> vlcPlayer?.seekTo(positionMs)
                 PlayerBackendKind.Exo -> exoPlayer?.seekTo(positionMs)
             }
@@ -817,6 +1259,7 @@ fun PlayerScreen(
             vlcPlayer?.seekBack()
         } else {
             when (activeBackendKind) {
+                PlayerBackendKind.Mpv -> mpvPlayer?.seekBack()
                 PlayerBackendKind.Vlc -> vlcPlayer?.seekBack()
                 PlayerBackendKind.Exo -> exoPlayer?.seekBack()
             }
@@ -829,6 +1272,7 @@ fun PlayerScreen(
             vlcPlayer?.seekForward()
         } else {
             when (activeBackendKind) {
+                PlayerBackendKind.Mpv -> mpvPlayer?.seekForward()
                 PlayerBackendKind.Vlc -> vlcPlayer?.seekForward()
                 PlayerBackendKind.Exo -> exoPlayer?.seekForward()
             }
@@ -847,6 +1291,14 @@ fun PlayerScreen(
             }
         } else {
             when (activeBackendKind) {
+                PlayerBackendKind.Mpv -> {
+                    if (mpvPlayer?.isPlaying == true) {
+                        mpvPlayer.pause()
+                    } else {
+                        mpvPlayer?.play()
+                    }
+                }
+
                 PlayerBackendKind.Vlc -> {
                     if (vlcPlayer?.isPlaying == true) {
                         vlcPlayer.pause()
@@ -870,25 +1322,45 @@ fun PlayerScreen(
         controlsVisible = true
     }
 
-    fun forceCompatibilityBackend(trigger: String) {
-        if (experimentalDualBackendRace) {
-            promoteRaceBackend(PlayerBackendKind.Vlc, trigger)
-            return
+    fun switchBackendIfNeeded(
+        targetBackend: PlayerBackendKind,
+        trigger: String,
+    ): Boolean {
+        if (experimentalDualBackendRace && !raceResolved) {
+            promoteRaceBackend(targetBackend, trigger)
+            return true
         }
-        if (preferredBackendKind == PlayerBackendKind.Vlc) return
+        if (activeBackendKind == targetBackend || targetBackend.name in attemptedBackendKinds) return false
         Log.w(
             PlayerDebugTag,
-            "force vlc backend title=$title mediaId=$mediaId trigger=$trigger option=${activeStreamOption.id} url=${activeStreamOption.streamUrl}",
+            "switch backend title=$title mediaId=$mediaId trigger=$trigger from=$activeBackendKind to=$targetBackend option=${activeStreamOption.id} url=${activeStreamOption.streamUrl}",
         )
-        compatibilityPlaybackUrl = resolvedPlaybackUrl.takeIf { candidate ->
-            candidate.isNotBlank() && candidate != activeStreamOption.streamUrl
+        PlaybackBackendMemory.forget(backendMemoryKey, activeBackendKind)
+        activeBackendKindName = targetBackend.name
+        attemptedBackendKinds = attemptedBackendKinds + targetBackend.name
+        compatibilityPlaybackUrl = if (targetBackend == PlayerBackendKind.Vlc) {
+            resolvedPlaybackUrl.takeIf { candidate ->
+                candidate.isNotBlank() && candidate != activeStreamOption.streamUrl
+            }
+        } else {
+            null
         }
         capturePlaybackState()
         resumePlayWhenReady = true
-        forceVlcCompatibilityBackend = true
+        forceVlcCompatibilityBackend = targetBackend == PlayerBackendKind.Vlc
+        forceExoStandardBackend = targetBackend == PlayerBackendKind.Exo
+        forceMpvBackend = targetBackend == PlayerBackendKind.Mpv
         hasRenderedFirstFrame = false
         bitrateEstimateBitsPerSecond = 0L
         autoFallbackInProgress = false
+        return true
+    }
+
+    fun maybeSwitchBackendAfterFailure(trigger: String): Boolean {
+        val targetBackend = automaticBackendOrder.firstOrNull { backend ->
+            backend != activeBackendKind && backend.name !in attemptedBackendKinds
+        } ?: return false
+        return switchBackendIfNeeded(targetBackend, trigger)
     }
 
     fun maybeUpdateResolvedPlaybackUrl(
@@ -911,6 +1383,7 @@ fun PlayerScreen(
         showRuntimeSheet = target == PlayerSheet.Runtime
         if (target != PlayerSheet.Track) {
             showSubtitleSheet = false
+            showAudioSheet = false
         }
         revealControls()
     }
@@ -922,10 +1395,11 @@ fun PlayerScreen(
                 revealControls()
             }
 
-            showTrackSheet || showRuntimeSheet || showSubtitleSheet -> {
+            showTrackSheet || showRuntimeSheet || showSubtitleSheet || showAudioSheet -> {
                 showTrackSheet = false
                 showRuntimeSheet = false
                 showSubtitleSheet = false
+                showAudioSheet = false
                 revealControls()
             }
 
@@ -979,17 +1453,137 @@ fun PlayerScreen(
         return true
     }
 
+    fun snapshotExoRuntimeSubtitleTracks(tracks: Tracks): List<ExoRuntimeSubtitleTrack> {
+        return tracks.groups.flatMapIndexed { groupIndex, group ->
+            if (group.type != C.TRACK_TYPE_TEXT) {
+                return@flatMapIndexed emptyList()
+            }
+            buildList {
+                for (trackIndex in 0 until group.length) {
+                    val format = group.getTrackFormat(trackIndex)
+                    add(
+                        ExoRuntimeSubtitleTrack(
+                            groupIndex = groupIndex,
+                            trackIndex = trackIndex,
+                            label = format.label
+                                ?: format.language
+                                ?: format.sampleMimeType
+                                ?: "字幕 ${trackIndex + 1}",
+                            language = format.language,
+                            isDefault = (format.selectionFlags and C.SELECTION_FLAG_DEFAULT) != 0,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    fun snapshotExoRuntimeAudioTracks(tracks: Tracks): List<ExoRuntimeAudioTrack> {
+        return tracks.groups.flatMapIndexed { groupIndex, group ->
+            if (group.type != C.TRACK_TYPE_AUDIO) {
+                return@flatMapIndexed emptyList()
+            }
+            buildList {
+                for (trackIndex in 0 until group.length) {
+                    val format = group.getTrackFormat(trackIndex)
+                    add(
+                        ExoRuntimeAudioTrack(
+                            groupIndex = groupIndex,
+                            trackIndex = trackIndex,
+                            label = format.label
+                                ?: format.language
+                                ?: format.sampleMimeType
+                                ?: "音轨 ${trackIndex + 1}",
+                            language = format.language,
+                            isDefault = (format.selectionFlags and C.SELECTION_FLAG_DEFAULT) != 0,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    fun applyExoSubtitleSelection() {
+        val player = exoPlayer ?: return
+        val selectedTrack = when (selectedSubtitleKey) {
+            null -> autoSubtitleTracks.firstOrNull()
+            SUBTITLE_OFF -> null
+            else -> availableSubtitleTracks.firstOrNull { it.key == selectedSubtitleKey }
+        }
+        val builder = player.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+        if (selectedSubtitleKey == SUBTITLE_OFF) {
+            player.trackSelectionParameters = builder
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                .build()
+            return
+        }
+        val groupIndex = selectedTrack?.exoGroupIndex
+        val trackIndex = selectedTrack?.exoTrackIndex
+        if (groupIndex != null && trackIndex != null) {
+            val group = player.currentTracks.groups.getOrNull(groupIndex)?.mediaTrackGroup
+            if (group != null) {
+                player.trackSelectionParameters = builder
+                    .addOverride(TrackSelectionOverride(group, trackIndex))
+                    .build()
+                return
+            }
+        }
+        val preferredLanguage = selectedTrack?.language
+        player.trackSelectionParameters = if (!preferredLanguage.isNullOrBlank()) {
+            builder.setPreferredTextLanguage(preferredLanguage).build()
+        } else {
+            builder.setSelectUndeterminedTextLanguage(true).build()
+        }
+    }
+
+    fun applyExoAudioSelection() {
+        val player = exoPlayer ?: return
+        val selectedTrack = when (selectedAudioKey) {
+            null -> autoAudioTracks.firstOrNull()
+            else -> availableAudioTracks.firstOrNull { it.key == selectedAudioKey }
+        }
+        val builder = player.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+        val groupIndex = selectedTrack?.exoGroupIndex
+        val trackIndex = selectedTrack?.exoTrackIndex
+        if (groupIndex != null && trackIndex != null) {
+            val group = player.currentTracks.groups.getOrNull(groupIndex)?.mediaTrackGroup
+            if (group != null) {
+                player.trackSelectionParameters = builder
+                    .addOverride(TrackSelectionOverride(group, trackIndex))
+                    .build()
+                return
+            }
+        }
+        val preferredLanguage = selectedTrack?.language
+        player.trackSelectionParameters = if (!preferredLanguage.isNullOrBlank()) {
+            builder.setPreferredAudioLanguage(preferredLanguage).build()
+        } else {
+            builder.setPreferredAudioLanguages().build()
+        }
+    }
+
     val keepExoSession = exoPlayer != null &&
         (!experimentalDualBackendRace || raceInProgress || activeBackendKind == PlayerBackendKind.Exo)
     val keepVlcSession = vlcPlayer != null &&
         (!experimentalDualBackendRace || raceInProgress || activeBackendKind == PlayerBackendKind.Vlc)
+    val keepMpvSession = mpvPlayer != null &&
+        (!experimentalDualBackendRace || raceInProgress || activeBackendKind == PlayerBackendKind.Mpv)
 
-    LaunchedEffect(exoPlayer, vlcPlayer, experimentalDualBackendRace, raceResolved, activeBackendKind) {
+    LaunchedEffect(exoPlayer, vlcPlayer, mpvPlayer, experimentalDualBackendRace, raceResolved, activeBackendKind) {
         exoPlayer?.volume = when {
             experimentalDualBackendRace && !raceResolved -> 0f
             activeBackendKind == PlayerBackendKind.Exo -> 1f
             else -> 0f
         }
+        mpvPlayer?.setVolume(
+            when {
+                activeBackendKind == PlayerBackendKind.Mpv -> 100
+                else -> 0
+            },
+        )
         vlcPlayer?.setVolume(
             when {
                 experimentalDualBackendRace && !raceResolved -> 0
@@ -997,6 +1591,32 @@ fun PlayerScreen(
                 else -> 0
             },
         )
+    }
+
+    LaunchedEffect(
+        selectedAudioKey,
+        activeAudioTrack,
+        selectedSubtitleKey,
+        activeSubtitleTracks,
+        sourceExternalSubtitleTracks,
+        exoPlayer,
+        mpvPlayer,
+        vlcPlayer,
+        activeBackendKind,
+        raceInProgress,
+    ) {
+        mpvPlayer?.updateAudioSelection(activeAudioTrack?.mpvTrackId)
+        mpvPlayer?.updateSubtitleSelection(
+            trackId = activeSubtitleTracks.firstOrNull()?.mpvTrackId,
+            disabled = selectedSubtitleKey == SUBTITLE_OFF,
+        )
+        vlcPlayer?.updateAudioSelection(activeAudioTrack?.vlcTrackId)
+        vlcPlayer?.updateSubtitleSelection(
+            trackId = activeSubtitleTracks.firstOrNull()?.vlcTrackId,
+            disabled = selectedSubtitleKey == SUBTITLE_OFF,
+        )
+        applyExoAudioSelection()
+        applyExoSubtitleSelection()
     }
 
     if (keepExoSession) {
@@ -1021,6 +1641,11 @@ fun PlayerScreen(
                     }
                 }
 
+                override fun onTracksChanged(tracks: Tracks) {
+                    exoRuntimeAudioTracks = snapshotExoRuntimeAudioTracks(tracks)
+                    exoRuntimeSubtitleTracks = snapshotExoRuntimeSubtitleTracks(tracks)
+                }
+
                 override fun onPlayerError(error: PlaybackException) {
                     Log.e(
                         PlayerDebugTag,
@@ -1038,14 +1663,17 @@ fun PlayerScreen(
                         error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED ||
                         error.cause?.javaClass?.simpleName == "UnrecognizedInputFormatException"
                     ) {
-                        forceCompatibilityBackend(error.errorCodeName.ifBlank { "容器不支持" })
+                        if (maybeSwitchBackendAfterFailure(error.errorCodeName.ifBlank { "容器不支持" })) {
+                            return
+                        }
                         return
                     }
                     if (attemptAutoFallback(error.errorCodeName.ifBlank { "播放失败" })) {
                         return
                     }
-                    if (activeBackendKind == PlayerBackendKind.Exo) {
-                        forceCompatibilityBackend(error.errorCodeName.ifBlank { "Exo异常" })
+                    if (activeBackendKind == PlayerBackendKind.Exo &&
+                        maybeSwitchBackendAfterFailure(error.errorCodeName.ifBlank { "Exo异常" })
+                    ) {
                         return
                     }
                     mainHandler.post {
@@ -1127,6 +1755,8 @@ fun PlayerScreen(
                 }
             player.addListener(listener)
             player.addAnalyticsListener(analyticsListener)
+            exoRuntimeAudioTracks = snapshotExoRuntimeAudioTracks(player.currentTracks)
+            exoRuntimeSubtitleTracks = snapshotExoRuntimeSubtitleTracks(player.currentTracks)
             onDispose {
                 capturePlaybackState()
                 player.removeListener(listener)
@@ -1139,6 +1769,16 @@ fun PlayerScreen(
     if (keepVlcSession) {
         DisposableEffect(vlcPlayer) {
             val player = vlcPlayer
+            onDispose {
+                capturePlaybackState()
+                player.release()
+            }
+        }
+    }
+
+    if (keepMpvSession) {
+        DisposableEffect(mpvPlayer) {
+            val player = mpvPlayer
             onDispose {
                 capturePlaybackState()
                 player.release()
@@ -1183,19 +1823,51 @@ fun PlayerScreen(
 
     LaunchedEffect(activeStreamOption.id) {
         autoFallbackInProgress = false
+        attemptedBackendKinds = setOf(initialBackendKind.name)
         hasRenderedFirstFrame = false
         bitrateEstimateBitsPerSecond = 0L
         redirectProbeState = RedirectProbeState.Idle
         resolvedPlaybackUrl = activeStreamOption.streamUrl
         compatibilityPlaybackUrl = null
-        activeBackendKindName = preferredBackendKind.name
+        activeBackendKindName = initialBackendKind.name
         raceResolved = !experimentalDualBackendRace
         exoFirstFrameAtMs = 0L
         vlcFirstFrameAtMs = 0L
+        mpvFirstFrameAtMs = 0L
         Log.i(
             PlayerDebugTag,
             "starting title=$title mediaId=$mediaId option=${activeStreamOption.id} entry=${activeStreamOption.streamUrl}",
         )
+    }
+
+    LaunchedEffect(
+        experimentalDualBackendRace,
+        activeStreamOption.id,
+        preferredBackendKind,
+        hasRenderedFirstFrame,
+        raceResolved,
+    ) {
+        if (!experimentalDualBackendRace) {
+            exoCompanionArmed = preferredBackendKind == PlayerBackendKind.Exo
+            return@LaunchedEffect
+        }
+        if (hasRenderedFirstFrame || raceResolved) {
+            return@LaunchedEffect
+        }
+        exoCompanionArmed = false
+        delay(exoCompanionDelayMs)
+        if (
+            hasRenderedFirstFrame ||
+            raceResolved ||
+            !shouldExpectPlaybackToStart()
+        ) {
+            return@LaunchedEffect
+        }
+        Log.i(
+            PlayerDebugTag,
+            "arm exo companion title=$title mediaId=$mediaId option=${activeStreamOption.id} delayMs=$exoCompanionDelayMs",
+        )
+        exoCompanionArmed = true
     }
 
     LaunchedEffect(activeStreamOption.id, activeStreamOption.streamUrl, activeStreamOption.requestHeaders) {
@@ -1216,6 +1888,7 @@ fun PlayerScreen(
         activeBackendKind,
         raceInProgress,
         exoPlayer,
+        mpvPlayer,
         vlcPlayer,
         activeStreamOption.id,
     ) {
@@ -1227,8 +1900,14 @@ fun PlayerScreen(
             playbackStateSnapshot() != Player.STATE_ENDED
         ) {
             val bytesRead = playbackTrafficTracker.totalBytesRead()
+            val bypassManagedFallbackAfterTimeout = shouldBypassManagedFallbackAfterTimeout(
+                currentOptionId = activeStreamOption.id,
+                currentOptionUrl = activeStreamOption.streamUrl,
+                resolvedPlaybackUrl = resolvedPlaybackUrl,
+                streamOptions = streamOptions,
+            )
             if (bytesRead > 0L) {
-                val extraWaitMs = 18_000L
+                val extraWaitMs = if (bypassManagedFallbackAfterTimeout) 6_000L else 18_000L
                 Log.i(
                     PlayerDebugTag,
                     "startup still flowing title=$title mediaId=$mediaId option=${activeStreamOption.id} bytes=$bytesRead extraWaitMs=$extraWaitMs entry=${activeStreamOption.streamUrl} resolved=$resolvedPlaybackUrl",
@@ -1243,8 +1922,18 @@ fun PlayerScreen(
                 }
             }
             if (activeBackendKind == PlayerBackendKind.Exo && sourceRequiresCompatibilityBackend) {
-                forceCompatibilityBackend("老封装起播超时")
-                return@LaunchedEffect
+                if (maybeSwitchBackendAfterFailure("老封装起播超时")) {
+                    return@LaunchedEffect
+                }
+            }
+            if (activeBackendKind == PlayerBackendKind.Exo && bypassManagedFallbackAfterTimeout) {
+                Log.w(
+                    PlayerDebugTag,
+                    "skip managed fallback after timeout title=$title mediaId=$mediaId option=${activeStreamOption.id} entry=${activeStreamOption.streamUrl} resolved=$resolvedPlaybackUrl",
+                )
+                if (maybeSwitchBackendAfterFailure("外链直链Exo起播超时")) {
+                    return@LaunchedEffect
+                }
             }
             Log.w(
                 PlayerDebugTag,
@@ -1253,11 +1942,18 @@ fun PlayerScreen(
             if (attemptAutoFallback("起播超时")) {
                 return@LaunchedEffect
             }
-            if (activeBackendKind == PlayerBackendKind.Exo) {
-                forceCompatibilityBackend(
-                    if (sourceRequiresCompatibilityBackend) "老封装起播超时" else "Exo起播超时",
-                )
+            if (maybeSwitchBackendAfterFailure("${activeBackendLabel}起播超时")) {
                 return@LaunchedEffect
+            }
+            if (activeBackendKind == PlayerBackendKind.Exo) {
+                if (
+                    switchBackendIfNeeded(
+                        PlayerBackendKind.Vlc,
+                        if (sourceRequiresCompatibilityBackend) "老封装起播超时" else "Exo起播超时",
+                    )
+                ) {
+                    return@LaunchedEffect
+                }
             }
             mainHandler.post {
                 Toast.makeText(
@@ -1282,9 +1978,43 @@ fun PlayerScreen(
         var smoothedBitrateBitsPerSecond = 0L
         var lastNonZeroSampleTimeMs = previousSampleTimeMs
         while (true) {
+            mpvPlayer?.syncState()
             vlcPlayer?.syncState()
+            if (mpvPlayer?.hasRenderedFirstFrame == true && mpvFirstFrameAtMs == 0L) {
+                registerBackendFirstFrame(PlayerBackendKind.Mpv, null)
+            }
             if (vlcPlayer?.hasRenderedFirstFrame == true && vlcFirstFrameAtMs == 0L) {
                 registerBackendFirstFrame(PlayerBackendKind.Vlc, null)
+            }
+            if (!experimentalDualBackendRace || raceInProgress || activeBackendKind == PlayerBackendKind.Mpv) {
+                if (activeBackendKind == PlayerBackendKind.Mpv) {
+                    durationMs = durationSnapshot()
+                    bufferedPositionMs = bufferedPositionSnapshot()
+                    isPlaying = isPlayingSnapshot()
+                    isBuffering = isBufferingSnapshot()
+                    if (!isScrubbing) {
+                        currentPositionMs = currentPositionSnapshot()
+                    }
+                    bitrateEstimateBitsPerSecond = mpvPlayer?.bitrateEstimateBitsPerSecond?.coerceAtLeast(0L) ?: 0L
+                    resolvedPlaybackUrl = mpvPlayer?.resolvedPlaybackUrl?.ifBlank { activeStreamOption.streamUrl }
+                        ?: activeStreamOption.streamUrl
+                    hasRenderedFirstFrame = mpvFirstFrameAtMs > 0L
+                }
+                mpvPlayer?.consumePendingError()?.let { errorLabel ->
+                    if (attemptAutoFallback(errorLabel)) {
+                        Unit
+                    } else if (maybeSwitchBackendAfterFailure(errorLabel)) {
+                        Unit
+                    } else {
+                        mainHandler.post {
+                            Toast.makeText(
+                                context.applicationContext,
+                                "当前片源暂时无法播放，请切换播放方式再试",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                    }
+                }
             }
             if (!experimentalDualBackendRace || raceInProgress || activeBackendKind == PlayerBackendKind.Vlc) {
                 if (activeBackendKind == PlayerBackendKind.Vlc) {
@@ -1303,7 +2033,11 @@ fun PlayerScreen(
                 vlcPlayer?.consumePendingError()?.let { errorLabel ->
                     if (experimentalDualBackendRace && !raceResolved) {
                         promoteRaceBackend(PlayerBackendKind.Exo, errorLabel)
-                    } else if (!attemptAutoFallback(errorLabel)) {
+                    } else if (attemptAutoFallback(errorLabel)) {
+                        Unit
+                    } else if (maybeSwitchBackendAfterFailure(errorLabel)) {
+                        Unit
+                    } else {
                         mainHandler.post {
                             Toast.makeText(
                                 context.applicationContext,
@@ -1355,12 +2089,13 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(activeBackendKind, raceInProgress, exoPlayer, vlcPlayer, playbackSpeed) {
+    LaunchedEffect(activeBackendKind, raceInProgress, exoPlayer, vlcPlayer, mpvPlayer, playbackSpeed) {
         if (raceInProgress) {
             vlcPlayer?.setPlaybackSpeed(currentPlaybackSpeedTarget())
             exoPlayer?.playbackParameters = PlaybackParameters(currentPlaybackSpeedTarget())
         } else {
             when (activeBackendKind) {
+                PlayerBackendKind.Mpv -> mpvPlayer?.setPlaybackSpeed(currentPlaybackSpeedTarget())
                 PlayerBackendKind.Vlc -> vlcPlayer?.setPlaybackSpeed(currentPlaybackSpeedTarget())
                 PlayerBackendKind.Exo -> exoPlayer?.playbackParameters = PlaybackParameters(currentPlaybackSpeedTarget())
             }
@@ -1395,14 +2130,15 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(controlsVisible, controlsLocked, isPlaying, showTrackSheet, showRuntimeSheet, showSubtitleSheet) {
+    LaunchedEffect(controlsVisible, controlsLocked, isPlaying, showTrackSheet, showRuntimeSheet, showSubtitleSheet, showAudioSheet) {
         if (
             controlsVisible &&
             !controlsLocked &&
             isPlaying &&
             !showTrackSheet &&
             !showRuntimeSheet &&
-            !showSubtitleSheet
+            !showSubtitleSheet &&
+            !showAudioSheet
         ) {
             delay(3200)
             controlsVisible = false
@@ -1416,6 +2152,22 @@ fun PlayerScreen(
                 gestureOverlayState = null
             }
         }
+    }
+
+    val exoViewVisibility = if (raceInProgress || activeBackendKind == PlayerBackendKind.Exo) {
+        View.VISIBLE
+    } else {
+        View.GONE
+    }
+    val vlcViewVisibility = if (raceInProgress || activeBackendKind == PlayerBackendKind.Vlc) {
+        View.VISIBLE
+    } else {
+        View.GONE
+    }
+    val mpvViewVisibility = if (raceInProgress || activeBackendKind == PlayerBackendKind.Mpv) {
+        View.VISIBLE
+    } else {
+        View.GONE
     }
 
     Box(
@@ -1437,6 +2189,7 @@ fun PlayerScreen(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                         )
                         useController = false
+                        visibility = exoViewVisibility
                         setResizeMode(scaleMode.resizeMode)
                         setBackgroundColor(android.graphics.Color.BLACK)
                         setShutterBackgroundColor(android.graphics.Color.BLACK)
@@ -1444,6 +2197,7 @@ fun PlayerScreen(
                     }
                 },
                 update = { playerView ->
+                    playerView.visibility = exoViewVisibility
                     playerView.setResizeMode(scaleMode.resizeMode)
                     playerView.setBackgroundColor(android.graphics.Color.BLACK)
                     playerView.setShutterBackgroundColor(android.graphics.Color.BLACK)
@@ -1460,7 +2214,23 @@ fun PlayerScreen(
                         alpha = if (raceInProgress) 0f else if (activeBackendKind == PlayerBackendKind.Vlc) 1f else 0f
                     },
                 factory = { requireNotNull(vlcPlayer).view },
-                update = {},
+                update = { playerView ->
+                    playerView.visibility = vlcViewVisibility
+                },
+            )
+        }
+
+        if (keepMpvSession) {
+            AndroidView(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        alpha = if (raceInProgress) 0f else if (activeBackendKind == PlayerBackendKind.Mpv) 1f else 0f
+                    },
+                factory = { requireNotNull(mpvPlayer).view },
+                update = { playerView ->
+                    playerView.visibility = mpvViewVisibility
+                },
             )
         }
 
@@ -1501,6 +2271,7 @@ fun PlayerScreen(
                             showTrackSheet = false
                             showRuntimeSheet = false
                             showSubtitleSheet = false
+                            showAudioSheet = false
                         }
                     }
                 }
@@ -1693,6 +2464,7 @@ fun PlayerScreen(
                             .fillMaxSize()
                             .padding(end = landscapeNavBarRightPadding),
                         subtitleChoiceLabel = subtitleChoiceLabel,
+                        audioChoiceLabel = audioChoiceLabel,
                         playbackSpeed = playbackSpeed,
                         isLandscapeFullscreen = isLandscapeFullscreen,
                         onToggleLock = {
@@ -1701,11 +2473,19 @@ fun PlayerScreen(
                             showTrackSheet = false
                             showRuntimeSheet = false
                             showSubtitleSheet = false
+                            showAudioSheet = false
                         },
                         onToggleSubtitleSheet = {
                             showTrackSheet = false
                             showRuntimeSheet = false
                             showSubtitleSheet = !showSubtitleSheet
+                            showAudioSheet = false
+                        },
+                        onToggleAudioSheet = {
+                            showTrackSheet = false
+                            showRuntimeSheet = false
+                            showAudioSheet = !showAudioSheet
+                            showSubtitleSheet = false
                         },
                         onToggleFullscreen = {
                             isLandscapeFullscreen = !isLandscapeFullscreen
@@ -1727,7 +2507,7 @@ fun PlayerScreen(
                     )
 
                     AnimatedVisibility(
-                        visible = showTrackSheet || showRuntimeSheet || showSubtitleSheet,
+                        visible = showTrackSheet || showRuntimeSheet || showSubtitleSheet || showAudioSheet,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .playerBottomOverlayInsets(isLandscapeFullscreen)
@@ -1745,13 +2525,26 @@ fun PlayerScreen(
                                 subtitleOptions = buildSubtitleOptions(
                                     sourceTracks = availableSubtitleTracks,
                                     autoTracks = autoSubtitleTracks,
-                                    selectedSubtitleIndex = selectedSubtitleIndex,
+                                    selectedSubtitleKey = selectedSubtitleKey,
                                 ),
-                                onSelectSubtitle = { targetIndex ->
-                                    capturePlaybackState()
-                                    selectedSubtitleIndex = targetIndex
+                                onSelectSubtitle = { targetKey ->
+                                    selectedSubtitleKey = targetKey
                                     reportPlaybackProgressEvent("SubtitleTrackChange")
                                     showSubtitleSheet = false
+                                    revealControls()
+                                },
+                            )
+
+                            showAudioSheet -> PlayerSubtitleSheet(
+                                subtitleOptions = buildAudioOptions(
+                                    sourceTracks = availableAudioTracks,
+                                    autoTracks = autoAudioTracks,
+                                    selectedAudioKey = selectedAudioKey,
+                                ),
+                                onSelectSubtitle = { targetKey ->
+                                    selectedAudioKey = targetKey
+                                    reportPlaybackProgressEvent("AudioTrackChange")
+                                    showAudioSheet = false
                                     revealControls()
                                 },
                             )
@@ -1760,11 +2553,15 @@ fun PlayerScreen(
                                 infoLine = source.infoLine.ifBlank { "当前媒体流" },
                                 title = title,
                                 subtitleChoiceLabel = subtitleChoiceLabel,
+                                audioChoiceLabel = audioChoiceLabel,
                                 runtimeLabel = runtimeProfile.label,
                                 backendLabel = activeBackendLabel,
                                 streamChoiceLabel = streamChoiceLabel,
                                 bitrateLabel = formatBitrate(bitrateEstimateBitsPerSecond),
                                 redirectProbeState = redirectProbeState,
+                                streamOptions = streamOptions,
+                                entryPlaybackUrl = activeStreamOption.streamUrl,
+                                currentPlaybackUrl = resolvedPlaybackUrl,
                                 infoFields = source.infoFields,
                             )
 
@@ -1792,7 +2589,8 @@ fun PlayerScreen(
                         !episodeTitle.isNullOrBlank() &&
                         !showTrackSheet &&
                         !showRuntimeSheet &&
-                        !showSubtitleSheet
+                        !showSubtitleSheet &&
+                        !showAudioSheet
                     ) {
                         PlayerEpisodeTitleOverlay(
                             modifier = Modifier
@@ -1901,6 +2699,7 @@ private enum class PlayerScaleMode(
 
 private enum class PlayerBackendKind {
     Exo,
+    Mpv,
     Vlc,
 }
 
@@ -1919,8 +2718,53 @@ private data class PlayerRuntimeProfile(
 private data class SubtitleOption(
     val title: String,
     val subtitle: String?,
-    val targetIndex: Int?,
+    val targetKey: String?,
     val selected: Boolean,
+)
+
+private data class PlayerSubtitleTrack(
+    val key: String,
+    val serverIndex: Int?,
+    val label: String,
+    val language: String?,
+    val url: String?,
+    val mimeType: String?,
+    val isDefault: Boolean,
+    val isExternal: Boolean,
+    val mpvTrackId: Int? = null,
+    val vlcTrackId: Int? = null,
+    val exoGroupIndex: Int? = null,
+    val exoTrackIndex: Int? = null,
+)
+
+private data class ExoRuntimeSubtitleTrack(
+    val groupIndex: Int,
+    val trackIndex: Int,
+    val label: String,
+    val language: String?,
+    val isDefault: Boolean,
+)
+
+private data class PlayerAudioTrack(
+    val key: String,
+    val serverIndex: Int?,
+    val label: String,
+    val language: String?,
+    val codec: String?,
+    val channels: Int?,
+    val isDefault: Boolean,
+    val mpvTrackId: Int? = null,
+    val vlcTrackId: Int? = null,
+    val exoGroupIndex: Int? = null,
+    val exoTrackIndex: Int? = null,
+)
+
+private data class ExoRuntimeAudioTrack(
+    val groupIndex: Int,
+    val trackIndex: Int,
+    val label: String,
+    val language: String?,
+    val isDefault: Boolean,
 )
 
 private enum class PlayerGestureMode {
@@ -1936,7 +2780,7 @@ private data class PlayerGestureOverlayState(
     val progress: Float? = null,
 )
 
-private const val SUBTITLE_OFF = -1
+private const val SUBTITLE_OFF = "__off__"
 
 private fun Modifier.playerBottomOverlayInsets(
     isLandscapeFullscreen: Boolean,
@@ -1950,8 +2794,8 @@ private fun PlayerTopTitleOverlay(
     modifier: Modifier = Modifier,
 ) {
     Column(
-        modifier = modifier.widthIn(max = if (compact) 220.dp else 320.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = modifier.widthIn(max = if (compact) 180.dp else 240.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
     ) {
         if (!titleLogoUrl.isNullOrBlank()) {
             AsyncImage(
@@ -1959,7 +2803,7 @@ private fun PlayerTopTitleOverlay(
                 contentDescription = title,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 28.dp, max = if (compact) 42.dp else 54.dp),
+                    .heightIn(min = 18.dp, max = if (compact) 26.dp else 34.dp),
                 contentScale = ContentScale.Fit,
                 alignment = Alignment.CenterStart,
             )
@@ -1967,13 +2811,13 @@ private fun PlayerTopTitleOverlay(
             Text(
                 text = title,
                 style = if (compact) {
-                    MaterialTheme.typography.titleLarge
+                    MaterialTheme.typography.bodySmall
                 } else {
-                    MaterialTheme.typography.headlineSmall
+                    MaterialTheme.typography.bodyMedium
                 }.copy(fontFamily = AppTitleFontFamily),
                 color = Color.White,
                 fontWeight = FontWeight.Bold,
-                maxLines = 2,
+                maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
@@ -2009,6 +2853,7 @@ private fun PlayerTopBar(
     compact: Boolean,
     onClose: () -> Unit,
 ) {
+    val reservedEndSpace = if (compact) 96.dp else 124.dp
     Row(
         modifier = modifier,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -2032,7 +2877,9 @@ private fun PlayerTopBar(
                 title = title,
                 titleLogoUrl = titleLogoUrl,
                 compact = compact,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = reservedEndSpace),
             )
         } else {
             Spacer(modifier = Modifier.weight(1f))
@@ -2044,10 +2891,12 @@ private fun PlayerTopBar(
 private fun PlayerSidePills(
     modifier: Modifier = Modifier,
     subtitleChoiceLabel: String,
+    audioChoiceLabel: String,
     playbackSpeed: Float,
     isLandscapeFullscreen: Boolean,
     onToggleLock: () -> Unit,
     onToggleSubtitleSheet: () -> Unit,
+    onToggleAudioSheet: () -> Unit,
     onToggleFullscreen: () -> Unit,
     onDecreaseSpeed: () -> Unit,
     onIncreaseSpeed: () -> Unit,
@@ -2067,6 +2916,11 @@ private fun PlayerSidePills(
                 icon = Icons.Rounded.Subtitles,
                 contentDescription = subtitleChoiceLabel,
                 onClick = onToggleSubtitleSheet,
+            )
+            PlayerOverlayIconButton(
+                icon = Icons.Rounded.Audiotrack,
+                contentDescription = audioChoiceLabel,
+                onClick = onToggleAudioSheet,
             )
             PlayerOverlayIconButton(
                 icon = Icons.Rounded.Lock,
@@ -2322,13 +3176,25 @@ private fun PlayerTrackSheet(
     infoLine: String,
     title: String,
     subtitleChoiceLabel: String,
+    audioChoiceLabel: String,
     runtimeLabel: String,
     backendLabel: String,
     streamChoiceLabel: String,
     bitrateLabel: String?,
     redirectProbeState: RedirectProbeState,
+    streamOptions: List<EmbyPlaybackStreamOption>,
+    entryPlaybackUrl: String,
+    currentPlaybackUrl: String,
     infoFields: List<EmbyPlaybackInfoField>,
 ) {
+    val routeState = remember(entryPlaybackUrl, currentPlaybackUrl, streamOptions, redirectProbeState) {
+        resolvePlaybackRouteState(
+            entryPlaybackUrl = entryPlaybackUrl,
+            currentPlaybackUrl = currentPlaybackUrl,
+            streamOptions = streamOptions,
+            redirectProbeState = redirectProbeState,
+        )
+    }
     val scrollState = rememberScrollState()
     Column(
         modifier = Modifier
@@ -2361,14 +3227,22 @@ private fun PlayerTrackSheet(
                 color = Color.White.copy(alpha = 0.68f),
             )
         }
+        PlayerInfoFieldRow(label = "当前音轨", value = audioChoiceLabel)
         PlayerInfoFieldRow(label = "当前字幕", value = subtitleChoiceLabel)
         PlayerInfoFieldRow(label = "播放策略", value = runtimeLabel)
         PlayerInfoFieldRow(label = "播放内核", value = backendLabel)
         PlayerInfoFieldRow(label = "串流方式", value = streamChoiceLabel)
+        PlayerInfoFieldRow(label = "链路状态", value = routeState.routeLabel)
+        PlayerInfoFieldRow(label = "传输路径", value = routeState.transportLabel)
         bitrateLabel?.let { PlayerInfoFieldRow(label = "码率", value = it) }
-        PlayerInfoFieldRow(label = "302状态", value = redirectProbeState.statusLabel())
-        redirectProbeState.redirectLocationOrNull()?.let { location ->
-            PlayerInfoFieldRow(label = "302直链", value = location, multiline = true)
+        routeState.technicalLabel?.let { label ->
+            PlayerInfoFieldRow(label = "入口重定向", value = label)
+        }
+        routeState.currentUrl?.let { currentUrl ->
+            PlayerInfoFieldRow(label = "当前链接", value = currentUrl, multiline = true)
+        }
+        routeState.entryUrl?.takeIf { it != routeState.currentUrl }?.let { entryUrl ->
+            PlayerInfoFieldRow(label = "请求入口", value = entryUrl, multiline = true)
         }
         infoFields.forEach { field ->
             PlayerInfoFieldRow(label = field.label, value = field.value)
@@ -2388,8 +3262,14 @@ private fun PlayerRuntimeSheet(
     entryPlaybackUrl: String,
     currentPlaybackUrl: String,
 ) {
-    val actualPlaybackUrl = currentPlaybackUrl.ifBlank { entryPlaybackUrl }
-    val redirected = actualPlaybackUrl != entryPlaybackUrl
+    val routeState = remember(entryPlaybackUrl, currentPlaybackUrl, streamOptions, redirectProbeState) {
+        resolvePlaybackRouteState(
+            entryPlaybackUrl = entryPlaybackUrl,
+            currentPlaybackUrl = currentPlaybackUrl,
+            streamOptions = streamOptions,
+            redirectProbeState = redirectProbeState,
+        )
+    }
     val scrollState = rememberScrollState()
     Column(
         modifier = Modifier
@@ -2410,20 +3290,21 @@ private fun PlayerRuntimeSheet(
         )
         PlayerInfoFieldRow(label = "播放策略", value = runtimeLabel)
         PlayerInfoFieldRow(label = "播放内核", value = backendLabel)
+        PlayerInfoFieldRow(label = "链路状态", value = routeState.routeLabel)
+        PlayerInfoFieldRow(label = "传输路径", value = routeState.transportLabel)
         bitrateLabel?.let { PlayerInfoFieldRow(label = "码率", value = it) }
-        PlayerInfoFieldRow(label = "302状态", value = redirectProbeState.statusLabel())
-        redirectProbeState.redirectLocationOrNull()?.let { location ->
-            PlayerInfoFieldRow(label = "302直链", value = location, multiline = true)
+        routeState.technicalLabel?.let { label ->
+            PlayerInfoFieldRow(label = "入口重定向", value = label)
         }
         PlayerInfoFieldRow(
-            label = if (redirected) "当前直链" else "当前链接",
-            value = actualPlaybackUrl,
+            label = if (routeState.isExternalDirect) "当前直链" else "当前链接",
+            value = routeState.currentUrl ?: entryPlaybackUrl,
             multiline = true,
         )
-        if (redirected) {
+        if (routeState.entryUrl != null && routeState.entryUrl != routeState.currentUrl) {
             PlayerInfoFieldRow(
                 label = "请求入口",
-                value = entryPlaybackUrl,
+                value = routeState.entryUrl,
                 multiline = true,
             )
         }
@@ -2451,7 +3332,7 @@ private fun PlayerRuntimeSheet(
 @Composable
 private fun PlayerSubtitleSheet(
     subtitleOptions: List<SubtitleOption>,
-    onSelectSubtitle: (Int?) -> Unit,
+    onSelectSubtitle: (String?) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -2465,7 +3346,7 @@ private fun PlayerSubtitleSheet(
         subtitleOptions.forEach { option ->
             SubtitleOptionRow(
                 option = option,
-                onClick = { onSelectSubtitle(option.targetIndex) },
+                onClick = { onSelectSubtitle(option.targetKey) },
             )
         }
     }
@@ -2932,9 +3813,9 @@ private fun PlayerBottomButton(
 }
 
 private fun buildSubtitleOptions(
-    sourceTracks: List<EmbySubtitleTrack>,
-    autoTracks: List<EmbySubtitleTrack>,
-    selectedSubtitleIndex: Int?,
+    sourceTracks: List<PlayerSubtitleTrack>,
+    autoTracks: List<PlayerSubtitleTrack>,
+    selectedSubtitleKey: String?,
 ): List<SubtitleOption> {
     val autoLabel = autoTracks.firstOrNull { it.isDefault }?.label ?: "服务端自动匹配"
 
@@ -2943,16 +3824,16 @@ private fun buildSubtitleOptions(
             SubtitleOption(
                 title = "自动",
                 subtitle = autoLabel,
-                targetIndex = null,
-                selected = selectedSubtitleIndex == null,
+                targetKey = null,
+                selected = selectedSubtitleKey == null,
             ),
         )
         add(
             SubtitleOption(
                 title = "关闭字幕",
                 subtitle = "不加载任何字幕轨",
-                targetIndex = SUBTITLE_OFF,
-                selected = selectedSubtitleIndex == SUBTITLE_OFF,
+                targetKey = SUBTITLE_OFF,
+                selected = selectedSubtitleKey == SUBTITLE_OFF,
             ),
         )
         sourceTracks.forEach { track ->
@@ -2963,8 +3844,8 @@ private fun buildSubtitleOptions(
                         append(track.language ?: "未标记语言")
                         append(if (track.isExternal) " · 外挂" else " · 内嵌")
                     },
-                    targetIndex = track.index,
-                    selected = selectedSubtitleIndex == track.index,
+                    targetKey = track.key,
+                    selected = selectedSubtitleKey == track.key,
                 ),
             )
         }
@@ -2972,14 +3853,14 @@ private fun buildSubtitleOptions(
 }
 
 private fun formatSubtitleChoiceLabel(
-    selectedSubtitleIndex: Int?,
-    sourceTracks: List<EmbySubtitleTrack>,
-    autoTracks: List<EmbySubtitleTrack>,
+    selectedSubtitleKey: String?,
+    sourceTracks: List<PlayerSubtitleTrack>,
+    autoTracks: List<PlayerSubtitleTrack>,
 ): String {
-    return when (selectedSubtitleIndex) {
+    return when (selectedSubtitleKey) {
         null -> autoTracks.firstOrNull { it.isDefault }?.label ?: "自动"
         SUBTITLE_OFF -> "关闭字幕"
-        else -> sourceTracks.firstOrNull { it.index == selectedSubtitleIndex }?.label ?: "字幕"
+        else -> sourceTracks.firstOrNull { it.key == selectedSubtitleKey }?.label ?: "字幕"
     }
 }
 
@@ -3029,8 +3910,29 @@ private fun shouldProbeRedirectState(
 ): Boolean {
     val normalizedOptionId = optionId.trim().lowercase(Locale.US)
     val normalizedUrl = streamUrl.trim().lowercase(Locale.US)
-    return normalizedOptionId == "server-direct" &&
-        (normalizedUrl.contains("/play/") || normalizedUrl.contains("play_source=emby_proxy"))
+    return when (normalizedOptionId) {
+        "emby-direct" -> normalizedUrl.contains("/videos/") && normalizedUrl.contains("/stream?")
+        "server-direct" -> normalizedUrl.contains("/play/") || normalizedUrl.contains("play_source=emby_proxy")
+        else -> false
+    }
+}
+
+private fun shouldBypassManagedFallbackAfterTimeout(
+    currentOptionId: String,
+    currentOptionUrl: String,
+    resolvedPlaybackUrl: String,
+    streamOptions: List<EmbyPlaybackStreamOption>,
+): Boolean {
+    if (!currentOptionId.equals("server-direct", ignoreCase = true)) {
+        return false
+    }
+    val embyDirectOption = streamOptions.firstOrNull { it.id.equals("emby-direct", ignoreCase = true) }
+        ?: return false
+    val embyHost = embyDirectOption.streamUrl.urlHostOrNull() ?: return false
+    val currentHost = resolvedPlaybackUrl.urlHostOrNull()
+        ?: currentOptionUrl.urlHostOrNull()
+        ?: return false
+    return !currentHost.equals(embyHost, ignoreCase = true)
 }
 
 private suspend fun probeRedirectState(
@@ -3082,6 +3984,72 @@ private fun RedirectProbeState.statusLabel(): String = when (this) {
 private fun RedirectProbeState.redirectLocationOrNull(): String? = when (this) {
     is RedirectProbeState.Hit -> location
     else -> null
+}
+
+private data class PlaybackRouteState(
+    val routeLabel: String,
+    val transportLabel: String,
+    val technicalLabel: String?,
+    val currentUrl: String?,
+    val entryUrl: String?,
+    val isExternalDirect: Boolean,
+)
+
+private fun resolvePlaybackRouteState(
+    entryPlaybackUrl: String,
+    currentPlaybackUrl: String,
+    streamOptions: List<EmbyPlaybackStreamOption>,
+    redirectProbeState: RedirectProbeState,
+): PlaybackRouteState {
+    val probeLocation = redirectProbeState.redirectLocationOrNull()?.takeIf { it.isNotBlank() }
+    val currentUrl = when {
+        currentPlaybackUrl.isNotBlank() && currentPlaybackUrl != entryPlaybackUrl -> currentPlaybackUrl
+        !probeLocation.isNullOrBlank() -> probeLocation
+        currentPlaybackUrl.isNotBlank() -> currentPlaybackUrl
+        else -> entryPlaybackUrl
+    }.takeIf { it.isNotBlank() }
+    val entryUrl = entryPlaybackUrl.takeIf { it.isNotBlank() }
+    val embyHost = streamOptions.firstOrNull { it.id.equals("emby-direct", ignoreCase = true) }
+        ?.streamUrl
+        ?.urlHostOrNull()
+        ?: entryUrl?.urlHostOrNull()
+    val currentHost = currentUrl?.urlHostOrNull()
+    val isExternalDirect = embyHost != null &&
+        currentHost != null &&
+        !currentHost.equals(embyHost, ignoreCase = true)
+    val routeLabel = when {
+        currentHost == null -> "待确认"
+        embyHost == null -> "直链"
+        isExternalDirect -> "直链"
+        else -> "中转"
+    }
+    val transportLabel = when {
+        currentHost == null -> "待确认"
+        embyHost == null -> "直链"
+        isExternalDirect -> "直链"
+        else -> "中转"
+    }
+    val technicalLabel = when (redirectProbeState) {
+        is RedirectProbeState.Hit -> "已发生 302"
+        is RedirectProbeState.NoRedirect -> "未发生 302"
+        is RedirectProbeState.Loading -> "探测中"
+        is RedirectProbeState.Failed -> redirectProbeState.message
+        is RedirectProbeState.Skipped -> redirectProbeState.reason
+        else -> null
+    }
+    return PlaybackRouteState(
+        routeLabel = routeLabel,
+        transportLabel = transportLabel,
+        technicalLabel = technicalLabel,
+        currentUrl = currentUrl,
+        entryUrl = entryUrl,
+        isExternalDirect = isExternalDirect,
+    )
+}
+
+private fun String.urlHostOrNull(): String? {
+    return runCatching { Uri.parse(this).host?.trim()?.lowercase(Locale.US) }.getOrNull()
+        ?.takeIf { it.isNotBlank() }
 }
 
 private fun String.isSubtitleLikeUri(): Boolean {
@@ -3284,10 +4252,219 @@ private fun shouldUseDualBackendRace(
     return modernVideoRisk || audioRisk || (commonContainer && networkHint)
 }
 
+private fun shouldPreferMpvBackend(
+    videoRange: String,
+    extendedVideoType: String,
+    bitDepth: Int?,
+    title: String,
+): Boolean {
+    val normalizedVideoRange = videoRange.trim().lowercase(Locale.US)
+    val normalizedExtendedVideoType = extendedVideoType.trim().lowercase(Locale.US)
+    val normalizedTitle = title.trim().lowercase(Locale.US)
+    return normalizedVideoRange.contains("hdr") ||
+        normalizedExtendedVideoType.isNotBlank() ||
+        normalizedTitle.contains("dolby vision") ||
+        normalizedTitle.contains("dv ") ||
+        normalizedTitle.contains("dovi") ||
+        normalizedTitle.contains("hdr10") ||
+        normalizedTitle.contains("hdr 10") ||
+        normalizedTitle.contains("hlg") ||
+        (bitDepth ?: 8) > 8
+}
+
+private fun buildMpvHwdecOption(
+    hdrRisk: Boolean,
+): String {
+    return if (hdrRisk) {
+        // HDR / Dolby Vision content is safer through MPV's copy-back path so the GPU
+        // pipeline can tone-map it instead of relying on direct surface output.
+        "mediacodec-copy,mediacodec"
+    } else {
+        "mediacodec,mediacodec-copy"
+    }
+}
+
+private fun shouldPreferSystemFastStartBackend(
+    container: String,
+    videoCodec: String,
+    audioCodec: String,
+    videoRange: String,
+    extendedVideoType: String,
+    bitDepth: Int?,
+    isRemote: Boolean,
+    infoLine: String,
+): Boolean {
+    val normalizedContainer = container.trim().lowercase(Locale.US)
+    val normalizedVideoCodec = videoCodec.trim().lowercase(Locale.US)
+    val normalizedAudioCodec = audioCodec.trim().lowercase(Locale.US)
+    val normalizedVideoRange = videoRange.trim().lowercase(Locale.US)
+    val normalizedExtendedVideoType = extendedVideoType.trim().lowercase(Locale.US)
+    val normalizedInfoLine = infoLine.trim().lowercase(Locale.US)
+
+    val commonContainer = normalizedContainer in setOf(
+        "m4v",
+        "mkv",
+        "mov",
+        "mp4",
+    )
+    val safeVideoCodec = normalizedVideoCodec in setOf(
+        "avc",
+        "h264",
+        "mpeg4",
+    )
+    val unsupportedAudioRisk = normalizedAudioCodec in setOf(
+        "amr_nb",
+        "amr_wb",
+        "cook",
+        "mp2",
+        "pcm_alaw",
+        "pcm_mulaw",
+        "wmav1",
+        "wmav2",
+    )
+    val hdrRisk = normalizedVideoRange.contains("hdr") ||
+        normalizedExtendedVideoType.isNotBlank() ||
+        (bitDepth ?: 8) > 8
+    val remoteHint = isRemote ||
+        normalizedInfoLine.contains("strm") ||
+        normalizedInfoLine.contains("网络直链") ||
+        normalizedInfoLine.contains("direct")
+
+    return commonContainer &&
+        safeVideoCodec &&
+        !unsupportedAudioRisk &&
+        !hdrRisk &&
+        !remoteHint
+}
+
+private fun buildAutomaticBackendOrder(
+    runtimeMode: String,
+    legacyRisk: Boolean,
+    hdrRisk: Boolean,
+    container: String,
+    videoCodec: String,
+    audioCodec: String,
+    isRemote: Boolean,
+    infoLine: String,
+): List<PlayerBackendKind> {
+    if (legacyRisk) {
+        return listOf(
+            PlayerBackendKind.Vlc,
+            PlayerBackendKind.Mpv,
+            PlayerBackendKind.Exo,
+        )
+    }
+    if (hdrRisk) {
+        return listOf(
+            PlayerBackendKind.Vlc,
+            PlayerBackendKind.Mpv,
+            PlayerBackendKind.Exo,
+        )
+    }
+    val normalizedInfoLine = infoLine.trim().lowercase(Locale.US)
+    val remoteManagedLink = isRemote ||
+        normalizedInfoLine.contains("strm") ||
+        normalizedInfoLine.contains("网络直链") ||
+        normalizedInfoLine.contains("direct")
+    if (remoteManagedLink) {
+        return listOf(
+            PlayerBackendKind.Exo,
+            PlayerBackendKind.Vlc,
+            PlayerBackendKind.Mpv,
+        )
+    }
+    if (
+        shouldPreferSystemFastStartBackend(
+            container = container,
+            videoCodec = videoCodec,
+            audioCodec = audioCodec,
+            videoRange = "",
+            extendedVideoType = "",
+            bitDepth = 8,
+            isRemote = isRemote,
+            infoLine = infoLine,
+        )
+    ) {
+        return when (runtimeMode) {
+            PLAYER_MODE_COMPATIBILITY -> listOf(
+                PlayerBackendKind.Mpv,
+                PlayerBackendKind.Exo,
+                PlayerBackendKind.Vlc,
+            )
+
+            PLAYER_MODE_SYSTEM -> listOf(
+                PlayerBackendKind.Exo,
+                PlayerBackendKind.Mpv,
+                PlayerBackendKind.Vlc,
+            )
+
+            else -> listOf(
+                PlayerBackendKind.Exo,
+                PlayerBackendKind.Mpv,
+                PlayerBackendKind.Vlc,
+            )
+        }
+    }
+    return when (runtimeMode) {
+        PLAYER_MODE_SYSTEM -> listOf(
+            PlayerBackendKind.Mpv,
+            PlayerBackendKind.Exo,
+            PlayerBackendKind.Vlc,
+        )
+
+        PLAYER_MODE_COMPATIBILITY -> listOf(
+            PlayerBackendKind.Mpv,
+            PlayerBackendKind.Vlc,
+            PlayerBackendKind.Exo,
+        )
+
+        else -> listOf(
+            PlayerBackendKind.Mpv,
+            PlayerBackendKind.Exo,
+            PlayerBackendKind.Vlc,
+        )
+    }
+}
+
+private fun List<PlayerBackendKind>.filterAvailableBackends(
+    mpvAvailable: Boolean,
+): List<PlayerBackendKind> {
+    val filtered = filterNot { backend ->
+        backend == PlayerBackendKind.Mpv && !mpvAvailable
+    }
+    return if (filtered.isNotEmpty()) {
+        filtered
+    } else {
+        listOf(PlayerBackendKind.Vlc, PlayerBackendKind.Exo)
+    }
+}
+
+private fun companionArmDelayMs(modeLabel: String): Long = when (modeLabel) {
+    PLAYER_MODE_SYSTEM -> DualBackendExoCompanionDelayFastMs
+    PLAYER_MODE_COMPATIBILITY -> DualBackendExoCompanionDelayCompatibilityMs
+    else -> DualBackendExoCompanionDelayBalancedMs
+}
+
+private fun buildBackendMemoryKey(
+    mediaSourceId: String,
+    streamOptionId: String,
+    container: String,
+    videoCodec: String,
+    audioCodec: String,
+): String {
+    return listOf(
+        mediaSourceId.trim(),
+        streamOptionId.trim(),
+        container.trim().lowercase(Locale.US),
+        videoCodec.trim().lowercase(Locale.US),
+        audioCodec.trim().lowercase(Locale.US),
+    ).joinToString(separator = "|")
+}
+
 private fun runtimeModeDescription(label: String): String = when (label) {
-    PLAYER_MODE_SYSTEM -> "更贴近系统直解，起播更快，适合常见 MP4 / MKV / HLS 源流。"
-    PLAYER_MODE_COMPATIBILITY -> "使用 VLC 兼容内核，优先兜住挑封装、老编码和 Exo 难解的片源。"
-    else -> "默认先走 VLC，再按片源情况回退，兼顾兼容性和日常起播速度。"
+    PLAYER_MODE_SYSTEM -> "优先追求起播速度，常见直解片源会先走 Exo，起不来再自动切到兼容内核。"
+    PLAYER_MODE_COMPATIBILITY -> "优先走兼容内核，适合 STRM、302、HDR / DV 和更挑片源的封装。"
+    else -> "系统会根据片源自动选最合适的内核，并在起播异常时无感切换兜底。"
 }
 
 private fun Context.findActivity(): Activity? = when (this) {
@@ -3317,7 +4494,7 @@ private fun Activity.applyPlayerBrightness(value: Float) {
 
 private fun AppSettings.toPlayerRuntimeProfile(): PlayerRuntimeProfile = when (playerMode) {
     PLAYER_MODE_COMPATIBILITY -> PlayerRuntimeProfile(
-        backendKind = PlayerBackendKind.Vlc,
+        backendKind = PlayerBackendKind.Mpv,
         label = PLAYER_MODE_COMPATIBILITY,
         decoderFallback = true,
         minBufferMs = 18_000,
@@ -3341,7 +4518,7 @@ private fun AppSettings.toPlayerRuntimeProfile(): PlayerRuntimeProfile = when (p
     )
 
     else -> PlayerRuntimeProfile(
-        backendKind = PlayerBackendKind.Vlc,
+        backendKind = PlayerBackendKind.Mpv,
         label = PLAYER_MODE_STANDARD,
         decoderFallback = true,
         minBufferMs = 10_000,
@@ -3353,10 +4530,286 @@ private fun AppSettings.toPlayerRuntimeProfile(): PlayerRuntimeProfile = when (p
     )
 }
 
-private fun List<EmbySubtitleTrack>.resolveAutomaticSubtitleSelection(
+private fun EmbySubtitleTrack.toPlayerSubtitleTrack(): PlayerSubtitleTrack {
+    return PlayerSubtitleTrack(
+        key = "emby:${if (isExternal) "ext" else "int"}:$index",
+        serverIndex = index,
+        label = label,
+        language = language,
+        url = url,
+        mimeType = mimeType,
+        isDefault = isDefault,
+        isExternal = isExternal,
+    )
+}
+
+private fun EmbyAudioTrack.toPlayerAudioTrack(): PlayerAudioTrack {
+    return PlayerAudioTrack(
+        key = "emby:$index",
+        serverIndex = index,
+        label = label,
+        language = language,
+        codec = codec,
+        channels = channels,
+        isDefault = isDefault,
+    )
+}
+
+private fun MpvRuntimeSubtitleTrack.toPlayerSubtitleTrack(): PlayerSubtitleTrack {
+    return PlayerSubtitleTrack(
+        key = "mpv:$id",
+        serverIndex = null,
+        label = label,
+        language = language,
+        url = null,
+        mimeType = null,
+        isDefault = false,
+        isExternal = false,
+        mpvTrackId = id,
+    )
+}
+
+private fun MpvRuntimeAudioTrack.toPlayerAudioTrack(): PlayerAudioTrack {
+    return PlayerAudioTrack(
+        key = "mpv:$id",
+        serverIndex = null,
+        label = label,
+        language = language,
+        codec = null,
+        channels = null,
+        isDefault = false,
+        mpvTrackId = id,
+    )
+}
+
+private fun VlcRuntimeSubtitleTrack.toPlayerSubtitleTrack(): PlayerSubtitleTrack {
+    return PlayerSubtitleTrack(
+        key = "vlc:$id",
+        serverIndex = null,
+        label = label,
+        language = language,
+        url = null,
+        mimeType = null,
+        isDefault = false,
+        isExternal = false,
+        mpvTrackId = null,
+        vlcTrackId = id,
+    )
+}
+
+private fun VlcRuntimeAudioTrack.toPlayerAudioTrack(): PlayerAudioTrack {
+    return PlayerAudioTrack(
+        key = "vlc:$id",
+        serverIndex = null,
+        label = label,
+        language = language,
+        codec = null,
+        channels = null,
+        isDefault = false,
+        mpvTrackId = null,
+        vlcTrackId = id,
+    )
+}
+
+private fun ExoRuntimeSubtitleTrack.toPlayerSubtitleTrack(): PlayerSubtitleTrack {
+    return PlayerSubtitleTrack(
+        key = "exo:$groupIndex:$trackIndex",
+        serverIndex = null,
+        label = label,
+        language = language,
+        url = null,
+        mimeType = null,
+        isDefault = isDefault,
+        isExternal = false,
+        exoGroupIndex = groupIndex,
+        exoTrackIndex = trackIndex,
+    )
+}
+
+private fun ExoRuntimeAudioTrack.toPlayerAudioTrack(): PlayerAudioTrack {
+    return PlayerAudioTrack(
+        key = "exo:$groupIndex:$trackIndex",
+        serverIndex = null,
+        label = label,
+        language = language,
+        codec = null,
+        channels = null,
+        isDefault = isDefault,
+        exoGroupIndex = groupIndex,
+        exoTrackIndex = trackIndex,
+    )
+}
+
+private fun mergeSubtitleTracks(
+    sourceTracks: List<PlayerSubtitleTrack>,
+    runtimeTracks: List<PlayerSubtitleTrack>,
+): List<PlayerSubtitleTrack> {
+    if (runtimeTracks.isEmpty()) return sourceTracks
+
+    val matchedRuntimeKeys = mutableSetOf<String>()
+    val mergedTracks = sourceTracks.map { sourceTrack ->
+        if (sourceTrack.isExternal) {
+            return@map sourceTrack
+        }
+        val runtimeTrack = runtimeTracks.firstOrNull { candidate ->
+            candidate.key !in matchedRuntimeKeys && sourceTrack.canMergeWith(candidate)
+        }
+        if (runtimeTrack == null) {
+            sourceTrack
+        } else {
+            matchedRuntimeKeys += runtimeTrack.key
+            sourceTrack.copy(
+                label = sourceTrack.label.takeIf { it.isNotBlank() } ?: runtimeTrack.label,
+                language = sourceTrack.language ?: runtimeTrack.language,
+                isDefault = sourceTrack.isDefault || runtimeTrack.isDefault,
+                mpvTrackId = runtimeTrack.mpvTrackId,
+                vlcTrackId = runtimeTrack.vlcTrackId,
+                exoGroupIndex = runtimeTrack.exoGroupIndex,
+                exoTrackIndex = runtimeTrack.exoTrackIndex,
+            )
+        }
+    }.toMutableList()
+
+    runtimeTracks
+        .filterNot { it.key in matchedRuntimeKeys }
+        .forEach { mergedTracks += it }
+
+    return mergedTracks.distinctBy { it.key }
+}
+
+private fun mergeAudioTracks(
+    sourceTracks: List<PlayerAudioTrack>,
+    runtimeTracks: List<PlayerAudioTrack>,
+): List<PlayerAudioTrack> {
+    if (runtimeTracks.isEmpty()) return sourceTracks
+
+    val matchedRuntimeKeys = mutableSetOf<String>()
+    val mergedTracks = sourceTracks.map { sourceTrack ->
+        val runtimeTrack = runtimeTracks.firstOrNull { candidate ->
+            candidate.key !in matchedRuntimeKeys && sourceTrack.canMergeWith(candidate)
+        }
+        if (runtimeTrack == null) {
+            sourceTrack
+        } else {
+            matchedRuntimeKeys += runtimeTrack.key
+            sourceTrack.copy(
+                label = sourceTrack.label.takeIf { it.isNotBlank() } ?: runtimeTrack.label,
+                language = sourceTrack.language ?: runtimeTrack.language,
+                isDefault = sourceTrack.isDefault || runtimeTrack.isDefault,
+                mpvTrackId = runtimeTrack.mpvTrackId,
+                vlcTrackId = runtimeTrack.vlcTrackId,
+                exoGroupIndex = runtimeTrack.exoGroupIndex,
+                exoTrackIndex = runtimeTrack.exoTrackIndex,
+            )
+        }
+    }.toMutableList()
+
+    runtimeTracks
+        .filterNot { it.key in matchedRuntimeKeys }
+        .forEach { mergedTracks += it }
+
+    return mergedTracks.distinctBy { it.key }
+}
+
+private fun PlayerSubtitleTrack.canMergeWith(runtimeTrack: PlayerSubtitleTrack): Boolean {
+    if (isExternal || runtimeTrack.isExternal) return false
+
+    val sourceLabel = normalizeSubtitleMatchText(label)
+    val runtimeLabel = normalizeSubtitleMatchText(runtimeTrack.label)
+    val sourceLanguage = normalizedSubtitleLanguage(language, label)
+    val runtimeLanguage = normalizedSubtitleLanguage(runtimeTrack.language, runtimeTrack.label)
+    val languageMatches = sourceLanguage != null && sourceLanguage == runtimeLanguage
+
+    return when {
+        sourceLabel.isNotBlank() && runtimeLabel.isNotBlank() &&
+            (sourceLabel == runtimeLabel || sourceLabel.contains(runtimeLabel) || runtimeLabel.contains(sourceLabel)) -> true
+        languageMatches && (sourceLabel.isGenericSubtitleLabel() || runtimeLabel.isGenericSubtitleLabel()) -> true
+        else -> false
+    }
+}
+
+private fun PlayerAudioTrack.canMergeWith(runtimeTrack: PlayerAudioTrack): Boolean {
+    val sourceLabel = normalizeSubtitleMatchText(label)
+    val runtimeLabel = normalizeSubtitleMatchText(runtimeTrack.label)
+    val sourceLanguage = normalizedSubtitleLanguage(language, label)
+    val runtimeLanguage = normalizedSubtitleLanguage(runtimeTrack.language, runtimeTrack.label)
+    val languageMatches = sourceLanguage != null && sourceLanguage == runtimeLanguage
+
+    return when {
+        sourceLabel.isNotBlank() && runtimeLabel.isNotBlank() &&
+            (sourceLabel == runtimeLabel || sourceLabel.contains(runtimeLabel) || runtimeLabel.contains(sourceLabel)) -> true
+        languageMatches && (sourceLabel.isGenericSubtitleLabel() || runtimeLabel.isGenericSubtitleLabel()) -> true
+        else -> false
+    }
+}
+
+private fun String.isGenericSubtitleLabel(): Boolean {
+    val value = lowercase(Locale.US)
+    return value.isBlank() ||
+        value.startsWith("subtitle") ||
+        value.startsWith("audio") ||
+        value.startsWith("track") ||
+        value.startsWith("spu") ||
+        value.startsWith("字幕")
+}
+
+private fun normalizeSubtitleMatchText(value: String): String {
+    return value
+        .lowercase(Locale.US)
+        .replace("subtitle", "")
+        .replace("audio", "")
+        .replace("track", "")
+        .replace("spu", "")
+        .replace("字幕", "")
+        .replace(" ", "")
+        .replace("-", "")
+        .replace("_", "")
+        .trim()
+}
+
+private fun normalizedSubtitleLanguage(
+    language: String?,
+    label: String,
+): String? {
+    val languageCode = language.orEmpty().lowercase(Locale.US)
+    val displayText = label.lowercase(Locale.US)
+    return when {
+        languageCode == "zh" ||
+            languageCode.startsWith("zh-") ||
+            languageCode == "chi" ||
+            languageCode == "zho" ||
+            languageCode == "chs" ||
+            languageCode == "cht" ||
+            languageCode == "zhs" ||
+            languageCode == "zht" ||
+            displayText.contains("中") ||
+            displayText.contains("chinese") -> "zh"
+        languageCode == "en" ||
+            languageCode.startsWith("en-") ||
+            languageCode == "eng" ||
+            displayText.contains("english") ||
+            displayText.contains("英文") ||
+            displayText.contains("英语") -> "en"
+        languageCode == "ja" ||
+            languageCode.startsWith("ja-") ||
+            languageCode == "jpn" ||
+            displayText.contains("japanese") ||
+            displayText.contains("日文") ||
+            displayText.contains("日语") -> "ja"
+        languageCode == "ko" ||
+            languageCode.startsWith("ko-") ||
+            languageCode == "kor" ||
+            displayText.contains("korean") ||
+            displayText.contains("韩文") ||
+            displayText.contains("韩语") -> "ko"
+        else -> null
+    }
+}
+
+private fun List<PlayerSubtitleTrack>.resolveAutomaticSubtitleSelection(
     embeddedLanguagePreference: String,
     externalLanguagePreference: String,
-): List<EmbySubtitleTrack> {
+): List<PlayerSubtitleTrack> {
     if (isEmpty()) return emptyList()
 
     val embeddedTracks = filterNot { it.isExternal }
@@ -3372,9 +4825,14 @@ private fun List<EmbySubtitleTrack>.resolveAutomaticSubtitleSelection(
     )
 }
 
-private fun List<EmbySubtitleTrack>.findPreferredSubtitle(
+private fun List<PlayerAudioTrack>.resolveAutomaticAudioSelection(): List<PlayerAudioTrack> {
+    val preferred = firstOrNull { it.isDefault } ?: firstOrNull() ?: return emptyList()
+    return listOf(preferred.copy(isDefault = true))
+}
+
+private fun List<PlayerSubtitleTrack>.findPreferredSubtitle(
     languagePreference: String,
-): EmbySubtitleTrack? {
+): PlayerSubtitleTrack? {
     return when (languagePreference) {
         SUBTITLE_LANGUAGE_PREFERENCE_FOLLOW_DEFAULT -> firstOrNull { it.isDefault } ?: firstOrNull()
         else -> firstOrNull { it.matchesLanguagePreference(languagePreference) }
@@ -3383,7 +4841,7 @@ private fun List<EmbySubtitleTrack>.findPreferredSubtitle(
     }
 }
 
-private fun EmbySubtitleTrack.matchesLanguagePreference(
+private fun PlayerSubtitleTrack.matchesLanguagePreference(
     languagePreference: String,
 ): Boolean {
     val languageCode = language.orEmpty().lowercase(Locale.US)
@@ -3448,6 +4906,63 @@ private fun EmbySubtitleTrack.matchesLanguagePreference(
         }
 
         else -> false
+    }
+}
+
+private fun buildAudioOptions(
+    sourceTracks: List<PlayerAudioTrack>,
+    autoTracks: List<PlayerAudioTrack>,
+    selectedAudioKey: String?,
+): List<SubtitleOption> {
+    val autoLabel = autoTracks.firstOrNull()?.label ?: "默认音轨"
+    return buildList {
+        add(
+            SubtitleOption(
+                title = "自动",
+                subtitle = autoLabel,
+                targetKey = null,
+                selected = selectedAudioKey == null,
+            ),
+        )
+        sourceTracks.forEach { track ->
+            add(
+                SubtitleOption(
+                    title = track.label,
+                    subtitle = buildString {
+                        append(track.language ?: "未标记语言")
+                        track.codec?.takeIf { it.isNotBlank() }?.let { codec ->
+                            append(" · ")
+                            append(codec.uppercase(Locale.US))
+                        }
+                        track.channels?.takeIf { it > 0 }?.let { channels ->
+                            append(" · ")
+                            append(
+                                when (channels) {
+                                    1 -> "1.0"
+                                    2 -> "2.0"
+                                    6 -> "5.1"
+                                    8 -> "7.1"
+                                    else -> "${channels}声道"
+                                },
+                            )
+                        }
+                    },
+                    targetKey = track.key,
+                    selected = selectedAudioKey == track.key,
+                ),
+            )
+        }
+    }
+}
+
+private fun formatAudioChoiceLabel(
+    selectedAudioKey: String?,
+    sourceTracks: List<PlayerAudioTrack>,
+    autoTracks: List<PlayerAudioTrack>,
+): String {
+    return when (selectedAudioKey) {
+        null -> autoTracks.firstOrNull()?.label ?: "自动"
+        else -> sourceTracks.firstOrNull { it.key == selectedAudioKey }?.label ?: "音轨"
     }
 }
 

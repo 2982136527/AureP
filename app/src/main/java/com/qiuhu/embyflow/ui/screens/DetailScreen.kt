@@ -122,21 +122,46 @@ fun DetailScreen(
             }
         }
     }
+    val defaultSeriesStartEpisode = remember(seriesEpisodes, seriesDetail) {
+        seriesEpisodes.firstOrNull() ?: seriesDetail?.nextUpEpisode
+    }
+    val seriesHasWatchHistory = remember(media, seriesDetail, resumeEpisodeTarget) {
+        if (!media.isSeries) {
+            false
+        } else {
+            val hasResumeCheckpoint = media.resumePositionMs > 0L || (resumeEpisodeTarget?.resumePositionMs ?: 0L) > 0L
+            val hasWatchedEpisodeCount = media.childCount?.let { totalCount ->
+                media.unplayedItemCount?.let { unplayedCount ->
+                    totalCount > 0 && unplayedCount in 0 until totalCount
+                }
+            } ?: false
+            val nextUpSuggestsProgress = seriesDetail?.nextUpEpisode?.let { nextUp ->
+                nextUp.resumePositionMs > 0L ||
+                    (nextUp.seasonNumber ?: 1) > 1 ||
+                    (nextUp.episodeNumber ?: 1) > 1
+            } ?: false
+            hasResumeCheckpoint || hasWatchedEpisodeCount || nextUpSuggestsProgress
+        }
+    }
     val playTarget = when {
-        media.isSeries && resumeEpisodeTarget != null -> resumeEpisodeTarget
-        media.isSeries -> seriesDetail?.nextUpEpisode ?: media
+        media.isSeries && seriesHasWatchHistory ->
+            resumeEpisodeTarget ?: seriesDetail?.nextUpEpisode ?: defaultSeriesStartEpisode ?: media
+
+        media.isSeries -> defaultSeriesStartEpisode ?: media
         else -> media
     }
     val playButtonLabel = when {
-        media.isSeries && resumeEpisodeTarget != null ->
-            "继续播放 ${resumeEpisodeTarget.seasonEpisodeLabel().ifBlank { "当前这一集" }}"
-        media.isSeries && seriesDetail?.nextUpEpisode != null ->
-            "继续播放 ${seriesDetail.nextUpEpisode.seasonEpisodeLabel().ifBlank { "下一集" }}"
+        media.isSeries && seriesHasWatchHistory && playTarget.mediaType.equals("Episode", ignoreCase = true) ->
+            "继续播放 ${playTarget.seasonEpisodeLabel().ifBlank { "当前这一集" }}"
         media.resumePositionMs > 0L -> "继续播放"
         media.isSeries -> "从第一集开始"
         else -> "开始播放"
     }
-    val highlightedEpisodeId = resumeEpisodeTarget?.id ?: seriesDetail?.nextUpEpisode?.id
+    val highlightedEpisodeId = if (seriesHasWatchHistory) {
+        resumeEpisodeTarget?.id ?: seriesDetail?.nextUpEpisode?.id
+    } else {
+        null
+    }
     val listState = rememberLazyListState()
     val density = LocalDensity.current
     val defaultHeroTransitionDistancePx = with(density) { 280.dp.toPx() }

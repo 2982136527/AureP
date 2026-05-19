@@ -28,8 +28,8 @@ android {
         applicationId = "com.qiuhu.embyflow"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "0.0.7"
+        versionCode = 8
+        versionName = "0.0.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -81,6 +81,9 @@ android {
     }
 
     packaging {
+        jniLibs {
+            pickFirsts += "lib/**/libc++_shared.so"
+        }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
@@ -108,6 +111,7 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.8.2")
     implementation("androidx.media3:media3-exoplayer:1.4.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
+    implementation("androidx.media3:media3-datasource-cronet:1.4.1")
     implementation("androidx.media3:media3-datasource-okhttp:1.4.1")
     implementation("androidx.media3:media3-ui:1.4.1")
     implementation("org.videolan.android:libvlc-all:3.7.0")

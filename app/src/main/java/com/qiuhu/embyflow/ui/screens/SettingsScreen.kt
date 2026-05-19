@@ -310,7 +310,7 @@ fun SettingsScreen(
 
         SettingsSheetKey.Player -> SettingsSheetModel(
             title = "播放策略",
-            subtitle = "默认优先走 VLC，只有快速起播会先走 Exo 直解",
+            subtitle = "不需要手动选内核，AureP 会按片源自动判断并在起播异常时自动切换",
             options = listOf(
                 PLAYER_MODE_COMPATIBILITY,
                 PLAYER_MODE_STANDARD,
@@ -470,21 +470,6 @@ fun SettingsScreen(
                             icon = Icons.Rounded.CollectionsBookmark,
                             checked = settings.showLibraryCardTitle,
                             onToggle = onUpdateShowLibraryCardTitle,
-                        ),
-                    ),
-                )
-            }
-
-            item {
-                SettingsToggleGroup(
-                    title = "实验功能",
-                    rows = listOf(
-                        SettingsToggleRow(
-                            label = "双核竞速",
-                            description = "同时预热 Exo 与 VLC，先出首帧者接管播放，可能更耗电和流量",
-                            icon = Icons.Rounded.Memory,
-                            checked = settings.experimentalDualBackendRace,
-                            onToggle = onUpdateExperimentalDualBackendRace,
                         ),
                     ),
                 )
