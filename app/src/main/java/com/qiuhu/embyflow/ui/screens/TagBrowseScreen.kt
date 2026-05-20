@@ -115,7 +115,11 @@ fun MediaBrowseScreen(
 
         when {
             isLoading -> {
-                item(span = { GridItemSpan(maxLineSpan) }) {
+                item(
+                    key = "browse-loading",
+                    span = { GridItemSpan(maxLineSpan) },
+                    contentType = "state",
+                ) {
                     EditorialCard(
                         modifier = Modifier.fillMaxWidth(),
                         contentPadding = PaddingValues(horizontal = 18.dp, vertical = 18.dp),
@@ -130,7 +134,11 @@ fun MediaBrowseScreen(
             }
 
             errorMessage != null -> {
-                item(span = { GridItemSpan(maxLineSpan) }) {
+                item(
+                    key = "browse-error",
+                    span = { GridItemSpan(maxLineSpan) },
+                    contentType = "state",
+                ) {
                     EditorialCard(
                         modifier = Modifier.fillMaxWidth(),
                         contentPadding = PaddingValues(horizontal = 18.dp, vertical = 18.dp),
@@ -145,7 +153,11 @@ fun MediaBrowseScreen(
             }
 
             items.isEmpty() -> {
-                item(span = { GridItemSpan(maxLineSpan) }) {
+                item(
+                    key = "browse-empty",
+                    span = { GridItemSpan(maxLineSpan) },
+                    contentType = "state",
+                ) {
                     EditorialCard(
                         modifier = Modifier.fillMaxWidth(),
                         contentPadding = PaddingValues(horizontal = 18.dp, vertical = 18.dp),
@@ -160,7 +172,11 @@ fun MediaBrowseScreen(
             }
 
             else -> {
-                gridItems(items) { item ->
+                gridItems(
+                    items = items,
+                    key = { item -> item.id },
+                    contentType = { item -> item.mediaType.ifBlank { if (item.isFolder) "folder" else "media" } },
+                ) { item ->
                     MediaPosterCard(
                         media = item,
                         compact = cardCompact,

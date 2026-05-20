@@ -47,6 +47,10 @@ fun EditorialCard(
 
     Box(
         modifier = modifier
+            .pressScale(
+                interactionSource = interactionSource,
+                enabled = onClick != null,
+            )
             .shadow(16.dp, shape, clip = false, ambientColor = EditorialShadow, spotColor = EditorialShadow)
             .clip(shape)
             .background(color)

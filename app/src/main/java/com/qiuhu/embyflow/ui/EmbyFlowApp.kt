@@ -1,5 +1,7 @@
 package com.qiuhu.embyflow.ui
 
+import android.os.SystemClock
+import android.util.Log
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.activity.compose.BackHandler
@@ -32,7 +34,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -42,7 +46,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.qiuhu.embyflow.data.settings.AppSettings
 import com.qiuhu.embyflow.model.EmbyHomePayload
 import com.qiuhu.embyflow.model.MediaItem
-import com.qiuhu.embyflow.model.displayName
 import com.qiuhu.embyflow.model.isSeries
 import com.qiuhu.embyflow.model.MediaPerson
 import com.qiuhu.embyflow.model.MediaTag
@@ -91,6 +94,7 @@ private sealed interface OverlayDestination {
 }
 
 private const val ErrorToastDurationMillis = 1800L
+private const val TabTraceTag = "AurePTabSwitch"
 
 @Composable
 fun EmbyFlowApp(
@@ -460,18 +464,10 @@ private fun RootScaffold(
     hasConfiguredServer: Boolean,
     onOpenLibrary: (MediaItem) -> Unit,
 ) {
-    val activeProfile = serverProfilesState.activeProfile
+    val saveableStateHolder = rememberSaveableStateHolder()
+    var tabSwitchTarget by remember { mutableStateOf<RootTab?>(null) }
+    var tabSwitchStartedAt by remember { mutableStateOf<Long?>(null) }
     var transientErrorMessage by remember { mutableStateOf<String?>(null) }
-    val displayServerName = if (isServerConnected) {
-        payload.server.serverName
-    } else {
-        activeProfile?.displayName() ?: "未配置服务器"
-    }
-    val displayUserName = if (isServerConnected) {
-        payload.server.userName
-    } else {
-        activeProfile?.username ?: "未配置"
-    }
 
     LaunchedEffect(errorMessage) {
         if (errorMessage.isNullOrBlank()) {
@@ -486,71 +482,48 @@ private fun RootScaffold(
         }
     }
 
+    LaunchedEffect(currentTab) {
+        if (tabSwitchTarget != currentTab) return@LaunchedEffect
+        withFrameNanos { }
+        val startedAt = tabSwitchStartedAt
+        val elapsed = startedAt?.let { SystemClock.uptimeMillis() - it } ?: -1L
+        Log.d(
+            TabTraceTag,
+            "visible tab=${currentTab.name} elapsed=${elapsed}ms",
+        )
+        tabSwitchTarget = null
+        tabSwitchStartedAt = null
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
-        when (currentTab) {
-            RootTab.Home -> HomeScreen(
-                serverName = displayServerName,
-                userName = displayUserName,
-                layoutMode = settings.layoutMode,
-                heroItems = if (isServerConnected) payload.heroItems else emptyList(),
-                highlightItems = if (isServerConnected) payload.highlightItems else emptyList(),
-                continueWatchingItems = if (isServerConnected) payload.resumeItems else emptyList(),
-                libraries = if (isServerConnected) payload.libraries else emptyList(),
+        saveableStateHolder.SaveableStateProvider(key = currentTab.name) {
+            RootTabContent(
+                tab = currentTab,
+                payload = payload,
+                settings = settings,
+                isRefreshingLibrary = isRefreshingLibrary,
+                isAppendingLibrary = isAppendingLibrary,
+                libraryGridState = libraryGridState,
+                libraryScrollSnapshots = libraryScrollSnapshots,
+                appUpdateState = appUpdateState,
+                onRefreshAppUpdate = onRefreshAppUpdate,
+                serverProfilesState = serverProfilesState,
+                onSaveServerProfile = onSaveServerProfile,
+                onDeleteServerProfile = onDeleteServerProfile,
+                onActivateServerProfile = onActivateServerProfile,
                 isServerConnected = isServerConnected,
                 hasConfiguredServer = hasConfiguredServer,
                 onOpenMedia = onOpenMedia,
                 onOpenLibrary = onOpenLibrary,
-            )
-
-            RootTab.Library -> LibraryScreen(
-                libraries = if (isServerConnected) payload.libraries else emptyList(),
-                selectedLibraryId = if (isServerConnected) payload.selectedLibraryId else null,
-                layoutMode = settings.layoutMode,
-                showLibraryCardTitle = settings.showLibraryCardTitle,
-                librarySortMode = settings.librarySortMode,
-                libraryItems = if (isServerConnected) payload.libraryItems else emptyList(),
-                libraryTotalCount = if (isServerConnected) payload.libraryTotalCount else 0,
-                isRefreshing = isRefreshingLibrary,
-                isAppending = isAppendingLibrary,
-                isServerConnected = isServerConnected,
-                hasConfiguredServer = hasConfiguredServer,
-                gridState = libraryGridState,
-                restoredScrollIndex = payload.selectedLibraryId
-                    ?.let { libraryScrollSnapshots[it]?.index }
-                    ?: 0,
-                restoredScrollOffset = payload.selectedLibraryId
-                    ?.let { libraryScrollSnapshots[it]?.offset }
-                    ?: 0,
                 onSelectLibrary = onSelectLibrary,
-                onLoadMore = onLoadMoreLibrary,
-                onSelectLibrarySortMode = onUpdateLibrarySortMode,
-                onOpenMedia = onOpenMedia,
-                onGridScrollChanged = { index, offset ->
-                    payload.selectedLibraryId?.let { libraryId ->
-                        libraryScrollSnapshots[libraryId] = LibraryScrollSnapshot(
-                            index = index,
-                            offset = offset,
-                        )
-                    }
-                },
-            )
-
-            RootTab.Settings -> SettingsScreen(
-                server = payload.server,
-                settings = settings,
-                appUpdateState = appUpdateState,
-                serverProfilesState = serverProfilesState,
+                onLoadMoreLibrary = onLoadMoreLibrary,
                 onUpdatePlayerMode = onUpdatePlayerMode,
                 onUpdateEmbeddedSubtitleLanguage = onUpdateEmbeddedSubtitleLanguage,
                 onUpdateExternalSubtitleLanguage = onUpdateExternalSubtitleLanguage,
                 onUpdateLayoutMode = onUpdateLayoutMode,
                 onUpdateShowLibraryCardTitle = onUpdateShowLibraryCardTitle,
                 onUpdateExperimentalDualBackendRace = onUpdateExperimentalDualBackendRace,
-                onRefreshAppUpdate = onRefreshAppUpdate,
-                onSaveServerProfile = onSaveServerProfile,
-                onDeleteServerProfile = onDeleteServerProfile,
-                onActivateServerProfile = onActivateServerProfile,
-                isServerConnected = isServerConnected,
+                onUpdateLibrarySortMode = onUpdateLibrarySortMode,
             )
         }
 
@@ -600,8 +573,113 @@ private fun RootScaffold(
                 FloatingNavItem(RootTab.Settings, "设置", Icons.Rounded.Settings),
             ),
             searchIcon = Icons.Rounded.Search,
-            onTabSelected = onTabSelected,
+            onTabSelected = { tab ->
+                if (tab != currentTab) {
+                    tabSwitchTarget = tab
+                    tabSwitchStartedAt = SystemClock.uptimeMillis()
+                    Log.d(
+                        TabTraceTag,
+                        "request from=${currentTab.name} to=${tab.name}",
+                    )
+                }
+                onTabSelected(tab)
+            },
             onSearchClick = onOpenSearch,
+        )
+    }
+}
+
+@Composable
+private fun RootTabContent(
+    tab: RootTab,
+    payload: EmbyHomePayload,
+    settings: AppSettings,
+    isRefreshingLibrary: Boolean,
+    isAppendingLibrary: Boolean,
+    libraryGridState: androidx.compose.foundation.lazy.grid.LazyGridState,
+    libraryScrollSnapshots: MutableMap<String, LibraryScrollSnapshot>,
+    appUpdateState: com.qiuhu.embyflow.data.update.AppUpdateState,
+    onRefreshAppUpdate: () -> Unit,
+    serverProfilesState: com.qiuhu.embyflow.model.ServerProfilesState,
+    onSaveServerProfile: (com.qiuhu.embyflow.model.ServerProfile) -> Unit,
+    onDeleteServerProfile: (String) -> Unit,
+    onActivateServerProfile: (String) -> Unit,
+    isServerConnected: Boolean,
+    hasConfiguredServer: Boolean,
+    onOpenMedia: (MediaItem) -> Unit,
+    onOpenLibrary: (MediaItem) -> Unit,
+    onSelectLibrary: (String) -> Unit,
+    onLoadMoreLibrary: () -> Unit,
+    onUpdatePlayerMode: (String) -> Unit,
+    onUpdateEmbeddedSubtitleLanguage: (String) -> Unit,
+    onUpdateExternalSubtitleLanguage: (String) -> Unit,
+    onUpdateLayoutMode: (String) -> Unit,
+    onUpdateShowLibraryCardTitle: (Boolean) -> Unit,
+    onUpdateExperimentalDualBackendRace: (Boolean) -> Unit,
+    onUpdateLibrarySortMode: (String) -> Unit,
+) {
+    when (tab) {
+        RootTab.Home -> HomeScreen(
+            layoutMode = settings.layoutMode,
+            heroItems = if (isServerConnected) payload.heroItems else emptyList(),
+            highlightItems = if (isServerConnected) payload.highlightItems else emptyList(),
+            continueWatchingItems = if (isServerConnected) payload.resumeItems else emptyList(),
+            libraries = if (isServerConnected) payload.libraries else emptyList(),
+            isServerConnected = isServerConnected,
+            hasConfiguredServer = hasConfiguredServer,
+            onOpenMedia = onOpenMedia,
+            onOpenLibrary = onOpenLibrary,
+        )
+
+        RootTab.Library -> LibraryScreen(
+            libraries = if (isServerConnected) payload.libraries else emptyList(),
+            selectedLibraryId = if (isServerConnected) payload.selectedLibraryId else null,
+            layoutMode = settings.layoutMode,
+            showLibraryCardTitle = settings.showLibraryCardTitle,
+            librarySortMode = settings.librarySortMode,
+            libraryItems = if (isServerConnected) payload.libraryItems else emptyList(),
+            libraryTotalCount = if (isServerConnected) payload.libraryTotalCount else 0,
+            isRefreshing = isRefreshingLibrary,
+            isAppending = isAppendingLibrary,
+            isServerConnected = isServerConnected,
+            hasConfiguredServer = hasConfiguredServer,
+            gridState = libraryGridState,
+            restoredScrollIndex = payload.selectedLibraryId
+                ?.let { libraryScrollSnapshots[it]?.index }
+                ?: 0,
+            restoredScrollOffset = payload.selectedLibraryId
+                ?.let { libraryScrollSnapshots[it]?.offset }
+                ?: 0,
+            onSelectLibrary = onSelectLibrary,
+            onLoadMore = onLoadMoreLibrary,
+            onSelectLibrarySortMode = onUpdateLibrarySortMode,
+            onOpenMedia = onOpenMedia,
+            onGridScrollChanged = { index, offset ->
+                payload.selectedLibraryId?.let { libraryId ->
+                    libraryScrollSnapshots[libraryId] = LibraryScrollSnapshot(
+                        index = index,
+                        offset = offset,
+                    )
+                }
+            },
+        )
+
+        RootTab.Settings -> SettingsScreen(
+            server = payload.server,
+            settings = settings,
+            appUpdateState = appUpdateState,
+            serverProfilesState = serverProfilesState,
+            onUpdatePlayerMode = onUpdatePlayerMode,
+            onUpdateEmbeddedSubtitleLanguage = onUpdateEmbeddedSubtitleLanguage,
+            onUpdateExternalSubtitleLanguage = onUpdateExternalSubtitleLanguage,
+            onUpdateLayoutMode = onUpdateLayoutMode,
+            onUpdateShowLibraryCardTitle = onUpdateShowLibraryCardTitle,
+            onUpdateExperimentalDualBackendRace = onUpdateExperimentalDualBackendRace,
+            onRefreshAppUpdate = onRefreshAppUpdate,
+            onSaveServerProfile = onSaveServerProfile,
+            onDeleteServerProfile = onDeleteServerProfile,
+            onActivateServerProfile = onActivateServerProfile,
+            isServerConnected = isServerConnected,
         )
     }
 }

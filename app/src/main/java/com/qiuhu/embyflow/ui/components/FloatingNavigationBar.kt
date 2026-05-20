@@ -1,7 +1,10 @@
 package com.qiuhu.embyflow.ui.components
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -18,6 +21,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,6 +54,8 @@ fun <T> FloatingNavigationBar(
     onTabSelected: (T) -> Unit,
     onSearchClick: () -> Unit,
 ) {
+    val searchInteractionSource = remember { MutableInteractionSource() }
+
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -92,10 +98,15 @@ fun <T> FloatingNavigationBar(
         Box(
             modifier = Modifier
                 .size(FloatingNavBarHeight)
+                .pressScale(searchInteractionSource)
                 .shadow(18.dp, CircleShape, clip = false, ambientColor = NavShadow, spotColor = NavShadow)
                 .clip(CircleShape)
                 .background(NavSurface)
-                .clickable(onClick = onSearchClick),
+                .clickable(
+                    interactionSource = searchInteractionSource,
+                    indication = null,
+                    onClick = onSearchClick,
+                ),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
@@ -115,17 +126,34 @@ private fun NavIconButton(
     label: String,
     onClick: () -> Unit,
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val backgroundColor = animateColorAsState(
+        targetValue = if (selected) NavSelected else Color.Transparent,
+        animationSpec = tween(durationMillis = 220),
+        label = "navBackgroundColor",
+    )
+    val iconTint = animateColorAsState(
+        targetValue = if (selected) NavIcon else NavIconMuted,
+        animationSpec = tween(durationMillis = 220),
+        label = "navIconTint",
+    )
+
     Box(
         modifier = modifier
+            .pressScale(interactionSource)
             .clip(RoundedCornerShape(23.dp))
-            .background(if (selected) NavSelected else Color.Transparent)
-            .clickable(onClick = onClick),
+            .background(backgroundColor.value)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick,
+            ),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
             imageVector = icon,
             contentDescription = label,
-            tint = if (selected) NavIcon else NavIconMuted,
+            tint = iconTint.value,
         )
     }
 }

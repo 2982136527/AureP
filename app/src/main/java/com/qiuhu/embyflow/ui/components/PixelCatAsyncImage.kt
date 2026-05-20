@@ -1,13 +1,14 @@
 package com.qiuhu.embyflow.ui.components
 
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.AsyncImagePainter
-import coil.compose.SubcomposeAsyncImage
-import coil.compose.SubcomposeAsyncImageContent
+import coil.compose.rememberAsyncImagePainter
 
 @Composable
 fun PixelCatAsyncImage(
@@ -18,25 +19,27 @@ fun PixelCatAsyncImage(
     alignment: Alignment = Alignment.Center,
     onSuccess: ((AsyncImagePainter.State.Success) -> Unit)? = null,
 ) {
-    SubcomposeAsyncImage(
+    val painter = rememberAsyncImagePainter(
         model = model,
-        contentDescription = contentDescription,
-        modifier = modifier,
         contentScale = contentScale,
-        alignment = alignment,
-        loading = {
-            PixelCatPlaceholder(
-                modifier = Modifier.fillMaxSize(),
-            )
-        },
-        error = {
-            PixelCatPlaceholder(
-                modifier = Modifier.fillMaxSize(),
-            )
-        },
-        success = { state ->
+        onSuccess = { state ->
             onSuccess?.invoke(state)
-            SubcomposeAsyncImageContent()
         },
     )
+
+    Box(modifier = modifier) {
+        if (painter.state !is AsyncImagePainter.State.Success) {
+            PixelCatPlaceholder(
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        Image(
+            painter = painter,
+            contentDescription = contentDescription,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = contentScale,
+            alignment = alignment,
+        )
+    }
 }

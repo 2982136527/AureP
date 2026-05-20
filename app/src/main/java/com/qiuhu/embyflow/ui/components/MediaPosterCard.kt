@@ -80,11 +80,13 @@ fun MediaPosterCard(
         Column(
             modifier = modifier.then(
                 if (onClick != null) {
-                    Modifier.clickable(
-                        interactionSource = interactionSource,
-                        indication = null,
-                        onClick = onClick,
-                    )
+                    Modifier
+                        .pressScale(interactionSource)
+                        .clickable(
+                            interactionSource = interactionSource,
+                            indication = null,
+                            onClick = onClick,
+                        )
                 } else {
                     Modifier
                 },

@@ -1,5 +1,11 @@
 package com.qiuhu.embyflow.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -80,6 +86,7 @@ import com.qiuhu.embyflow.ui.components.LibraryPosterAspectRatio
 import com.qiuhu.embyflow.ui.components.MediaPosterCard
 import com.qiuhu.embyflow.ui.components.MediaPosterCardStyle
 import com.qiuhu.embyflow.ui.components.PixelCatAsyncImage
+import com.qiuhu.embyflow.ui.components.pressScale
 import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.distinctUntilChanged
 
@@ -164,7 +171,6 @@ fun LibraryScreen(
         selectedLibraryId,
     ) {
         if (selectedLibraryId.isNullOrBlank()) return@LaunchedEffect
-
         snapshotFlow {
             gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset
         }
@@ -268,7 +274,11 @@ fun LibraryScreen(
             verticalArrangement = Arrangement.spacedBy(gridVerticalSpacing),
         ) {
             if (!isServerConnected) {
-                item(span = { GridItemSpan(maxLineSpan) }) {
+                item(
+                    key = "library-connection-state",
+                    span = { GridItemSpan(maxLineSpan) },
+                    contentType = "connection-state",
+                ) {
                     LibraryConnectionStateCard(
                         title = if (hasConfiguredServer) "当前还没有连接到媒体库" else "还没有添加服务器",
                         description = if (hasConfiguredServer) {
@@ -279,7 +289,11 @@ fun LibraryScreen(
                     )
                 }
             } else {
-                item(span = { GridItemSpan(maxLineSpan) }) {
+                item(
+                    key = "library-sort-trigger",
+                    span = { GridItemSpan(maxLineSpan) },
+                    contentType = "sort-trigger",
+                ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.End,
@@ -315,7 +329,11 @@ fun LibraryScreen(
                 }
 
                 if (libraries.isNotEmpty()) {
-                    item(span = { GridItemSpan(maxLineSpan) }) {
+                    item(
+                        key = "library-selector-row",
+                        span = { GridItemSpan(maxLineSpan) },
+                        contentType = "selector-row",
+                    ) {
                         BoxWithConstraints(
                             modifier = Modifier.fillMaxWidth(),
                         ) {
@@ -326,7 +344,11 @@ fun LibraryScreen(
                                 contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
                                 horizontalArrangement = Arrangement.spacedBy(selectorSpacing),
                             ) {
-                                items(libraries) { library ->
+                                items(
+                                    items = libraries,
+                                    key = { library -> library.id },
+                                    contentType = { "selector-card" },
+                                ) { library ->
                                     LibrarySelectorCard(
                                         library = library,
                                         selected = library.id == selectedLibraryId,
@@ -343,7 +365,11 @@ fun LibraryScreen(
                 }
 
                 if (libraries.isNotEmpty()) {
-                    item(span = { GridItemSpan(maxLineSpan) }) {
+                    item(
+                        key = "library-selector-divider",
+                        span = { GridItemSpan(maxLineSpan) },
+                        contentType = "divider",
+                    ) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -356,7 +382,11 @@ fun LibraryScreen(
                 }
 
                 if (libraryItems.isEmpty()) {
-                    item(span = { GridItemSpan(maxLineSpan) }) {
+                    item(
+                        key = "library-empty-state",
+                        span = { GridItemSpan(maxLineSpan) },
+                        contentType = "empty-state",
+                    ) {
                         EditorialCard(
                             modifier = Modifier.fillMaxWidth(),
                             contentPadding = PaddingValues(horizontal = 18.dp, vertical = 20.dp),
@@ -380,6 +410,7 @@ fun LibraryScreen(
                     gridItems(
                         items = libraryItems,
                         key = { item -> item.id },
+                        contentType = { item -> item.mediaType.ifBlank { if (item.isFolder) "folder" else "media" } },
                     ) { item ->
                         MediaPosterCard(
                             media = item,
@@ -393,7 +424,11 @@ fun LibraryScreen(
                 }
 
                 if (isAppending) {
-                    item(span = { GridItemSpan(maxLineSpan) }) {
+                    item(
+                        key = "library-append-indicator",
+                        span = { GridItemSpan(maxLineSpan) },
+                        contentType = "append-indicator",
+                    ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -413,7 +448,13 @@ fun LibraryScreen(
             }
         }
 
-        if (sortMenuExpanded && isServerConnected) {
+        AnimatedVisibility(
+            visible = sortMenuExpanded && isServerConnected,
+            enter = fadeIn(animationSpec = tween(durationMillis = 180)) +
+                slideInVertically(animationSpec = tween(durationMillis = 260)) { it / 8 },
+            exit = fadeOut(animationSpec = tween(durationMillis = 140)) +
+                slideOutVertically(animationSpec = tween(durationMillis = 220)) { it / 10 },
+        ) {
             LibrarySortSheet(
                 selectedMode = librarySortMode,
                 onDismiss = { sortMenuExpanded = false },
@@ -595,10 +636,26 @@ private fun LibrarySelectorCard(
     val interactionSource = remember { MutableInteractionSource() }
     val highlightColor = Color(0xFFD39B5D)
     val cardAspectRatio = 16f / 9f
+    val backgroundColor by animateColorAsState(
+        targetValue = if (selected) Color(0xFFF2E4D0) else EditorialSurface,
+        animationSpec = tween(durationMillis = 220),
+        label = "librarySelectorBackground",
+    )
+    val titleColor by animateColorAsState(
+        targetValue = if (selected) highlightColor else EditorialTextPrimary,
+        animationSpec = tween(durationMillis = 220),
+        label = "librarySelectorTitleColor",
+    )
+    val borderColor by animateColorAsState(
+        targetValue = if (selected) highlightColor else Color.Transparent,
+        animationSpec = tween(durationMillis = 220),
+        label = "librarySelectorBorderColor",
+    )
 
     Column(
         modifier = Modifier
             .width(cardWidth)
+            .pressScale(interactionSource)
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
@@ -619,12 +676,12 @@ private fun LibrarySelectorCard(
                         spotColor = if (selected) highlightColor.copy(alpha = 0.18f) else EditorialShadow,
                     )
                 .clip(shape)
-                .background(if (selected) Color(0xFFF2E4D0) else EditorialSurface)
+                .background(backgroundColor)
                 .then(
-                    if (selected) {
+                    if (borderColor != Color.Transparent) {
                         Modifier.border(
                             width = 2.dp,
-                            color = highlightColor,
+                            color = borderColor,
                             shape = shape,
                         )
                     } else {
@@ -651,7 +708,7 @@ private fun LibrarySelectorCard(
             Text(
                 text = library.title,
                 style = if (large) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleSmall,
-                color = if (selected) highlightColor else EditorialTextPrimary,
+                color = titleColor,
                 fontWeight = FontWeight.Bold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

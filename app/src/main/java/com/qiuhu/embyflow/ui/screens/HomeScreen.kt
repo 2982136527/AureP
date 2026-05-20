@@ -15,8 +15,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.stopScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -39,7 +40,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ChevronRight
-import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -80,6 +80,7 @@ import com.qiuhu.embyflow.model.hasBackdropImage
 import com.qiuhu.embyflow.model.isEpisode
 import com.qiuhu.embyflow.ui.components.MediaPosterCornerBadge
 import com.qiuhu.embyflow.ui.components.PixelCatAsyncImage
+import com.qiuhu.embyflow.ui.components.pressScale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -100,8 +101,6 @@ private const val TodayResumeVisibleCards = 1.5f
 
 @Composable
 fun HomeScreen(
-    serverName: String,
-    userName: String,
     layoutMode: String,
     heroItems: List<MediaItem>,
     highlightItems: List<MediaItem>,
@@ -112,6 +111,7 @@ fun HomeScreen(
     onOpenMedia: (MediaItem) -> Unit,
     onOpenLibrary: (MediaItem) -> Unit,
 ) {
+    val homeListState = rememberLazyListState()
     val heroRotationPool = remember(heroItems) {
         heroItems
             .distinctBy { it.id }
@@ -160,21 +160,18 @@ fun HomeScreen(
             .background(TodayBackground),
     ) {
         LazyColumn(
-            modifier = Modifier.fillMaxSize(),
+            state = homeListState,
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding(),
             contentPadding = PaddingValues(top = 18.dp, bottom = 128.dp),
             verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {
-            item {
-                TodayHeader(
-                    serverName = serverName,
-                    userName = userName,
-                    isServerConnected = isServerConnected,
-                    hasConfiguredServer = hasConfiguredServer,
-                )
-            }
-
             if (!isServerConnected) {
-                item {
+                item(
+                    key = "home-server-state",
+                    contentType = "info",
+                ) {
                     TodayInfoCard(
                         title = if (hasConfiguredServer) "还没有连接到媒体服务器" else "还没有添加服务器",
                         description = if (hasConfiguredServer) {
@@ -185,7 +182,10 @@ fun HomeScreen(
                     )
                 }
                 if (hasConfiguredServer) {
-                    item {
+                    item(
+                        key = "home-server-reconnect",
+                        contentType = "info",
+                    ) {
                         TodayInfoCard(
                             title = "已保存服务器，等待重新连接",
                             description = "设置页里可以切换其他服务器，或者回到当前服务器重新建立连接。",
@@ -193,7 +193,10 @@ fun HomeScreen(
                     }
                 }
             } else {
-                item {
+                item(
+                    key = "home-hero",
+                    contentType = "hero",
+                ) {
                     TodayHeroCarousel(
                         items = heroRotationPool,
                         cardWidthFraction = heroWidthFraction,
@@ -203,13 +206,19 @@ fun HomeScreen(
                 }
 
                 if (highlights.isNotEmpty()) {
-                    item {
+                    item(
+                        key = "home-highlights-header",
+                        contentType = "section-header",
+                    ) {
                         TodaySectionHeader(
                             title = "今日活动进行时",
                         )
                     }
 
-                    item {
+                    item(
+                        key = "home-highlights-row",
+                        contentType = "highlights",
+                    ) {
                         TodayHighlightsRow(
                             items = highlights,
                             itemSpacing = 8.dp,
@@ -218,21 +227,30 @@ fun HomeScreen(
                     }
                 }
 
-                item {
+                item(
+                    key = "home-resume-header",
+                    contentType = "section-header",
+                ) {
                     TodaySectionHeader(
                         title = "继续观看",
                     )
                 }
 
                 if (resumeItems.isEmpty()) {
-                    item {
+                    item(
+                        key = "home-resume-empty",
+                        contentType = "info",
+                    ) {
                         TodayInfoCard(
                             title = "还没有继续观看内容",
                             description = "开始播放后，断点续播会出现在这里。",
                         )
                     }
                 } else {
-                    item {
+                    item(
+                        key = "home-resume-row",
+                        contentType = "resume",
+                    ) {
                         TodayContinueWatchingRow(
                             items = resumeItems,
                             itemSpacing = rowSpacing,
@@ -242,13 +260,20 @@ fun HomeScreen(
                     }
                 }
 
-                item {
+                item(
+                    key = "home-library-header",
+                    contentType = "section-header",
+                ) {
                     TodaySectionHeader(
                         title = "媒体库",
                     )
                 }
 
-                items(libraries.take(libraryPreviewCount)) { item ->
+                items(
+                    items = libraries.take(libraryPreviewCount),
+                    key = { item -> item.id },
+                    contentType = { "library-row" },
+                ) { item ->
                     TodayLibraryRow(
                         media = item,
                         onClick = { onOpenLibrary(item) },
@@ -278,7 +303,11 @@ private fun TodayContinueWatchingRow(
             contentPadding = PaddingValues(horizontal = horizontalPadding),
             horizontalArrangement = Arrangement.spacedBy(itemSpacing),
         ) {
-            items(items) { item ->
+            items(
+                items = items,
+                key = { item -> item.continueWatchingDisplayKey() },
+                contentType = { "resume-card" },
+            ) { item ->
                 TodayFeatureCard(
                     media = item,
                     modifier = Modifier.width(cardWidth),
@@ -424,6 +453,7 @@ private fun TodayHighlightsRow(
                 items(
                     count = Int.MAX_VALUE,
                     key = { it },
+                    contentType = { "highlight-card" },
                 ) { index ->
                     val item = items[index % items.size]
                     TodayPosterFeatureCard(
@@ -439,7 +469,11 @@ private fun TodayHighlightsRow(
                     )
                 }
             } else {
-                items(items) { item ->
+                items(
+                    items = items,
+                    key = { item -> item.id },
+                    contentType = { "highlight-card" },
+                ) { item ->
                     TodayPosterFeatureCard(
                         media = item,
                         modifier = Modifier.width(itemWidth),
@@ -464,19 +498,22 @@ private fun TodayPosterFeatureCard(
     val shape = RoundedCornerShape(14.dp)
     val imageUrl = media.primaryImageUrl ?: media.backdropImageUrl
     val badgeLabel = media.cardEpisodeBadgeLabel()
+    val interactionSource = remember { MutableInteractionSource() }
 
     Column(
         modifier = modifier
-            .pointerInput(onClick, onPress) {
-                detectTapGestures(
-                    onPress = {
-                        onPress()
-                        if (tryAwaitRelease()) {
-                            onClick()
-                        }
-                    },
-                )
-            },
+            .pressScale(interactionSource)
+            .pointerInput(onPress) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    onPress()
+                }
+            }
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick,
+            ),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Box(
@@ -672,84 +709,6 @@ private fun TodayHeroCarousel(
 }
 
 @Composable
-private fun TodayHeader(
-    serverName: String,
-    userName: String,
-    isServerConnected: Boolean,
-    hasConfiguredServer: Boolean,
-) {
-    val statusText = when {
-        isServerConnected -> "已连接 · $userName"
-        hasConfiguredServer -> "等待连接 · $userName"
-        else -> "尚未配置服务器"
-    }
-    val statusColor = when {
-        isServerConnected -> Color(0xFF76C85F)
-        hasConfiguredServer -> Color(0xFFD09A55)
-        else -> Color(0xFFC6B6A3)
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                modifier = Modifier
-                    .shadow(8.dp, RoundedCornerShape(18.dp), clip = false, ambientColor = TodayCardShadow, spotColor = TodayCardShadow)
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(TodaySurface)
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-            ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(statusColor),
-                    )
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(
-                            text = serverName,
-                            style = MaterialTheme.typography.titleSmall,
-                            color = TodayTextPrimary,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Text(
-                            text = statusText,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TodayTextSecondary,
-                        )
-                    }
-                }
-            }
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .shadow(8.dp, CircleShape, clip = false, ambientColor = TodayCardShadow, spotColor = TodayCardShadow)
-                    .clip(CircleShape)
-                    .background(TodaySurface),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Person,
-                    contentDescription = null,
-                    tint = TodayTextPrimary,
-                )
-            }
-        }
-    }
-}
-
-@Composable
 private fun TodaySectionHeader(
     title: String,
     subtitle: String = "",
@@ -791,6 +750,7 @@ private fun TodayFeatureCard(
     val shape = RoundedCornerShape(16.dp)
     val imageUrl = imageUrlOverride ?: (media.backdropImageUrl ?: media.primaryImageUrl)
     val badgeLabel = media.cardEpisodeBadgeLabel()
+    val interactionSource = remember { MutableInteractionSource() }
     var imageAspectRatio by remember(imageUrl) { mutableStateOf(16f / 9f) }
     val cardSizeModifier = if (adaptCardToImage) {
         Modifier
@@ -805,10 +765,15 @@ private fun TodayFeatureCard(
     Box(
         modifier = modifier
             .then(cardSizeModifier)
+            .pressScale(interactionSource)
             .shadow(22.dp, shape, clip = false, ambientColor = TodayCardShadow, spotColor = TodayCardShadow)
             .clip(shape)
             .background(Brush.verticalGradient(media.colors))
-            .clickable(onClick = onClick),
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick,
+            ),
     ) {
         PixelCatAsyncImage(
             model = imageUrl,
@@ -1105,15 +1070,21 @@ private fun TodayLibraryRow(
     onClick: () -> Unit,
 ) {
     val imageUrl = media.backdropImageUrl ?: media.primaryImageUrl
+    val interactionSource = remember { MutableInteractionSource() }
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp)
+            .pressScale(interactionSource)
             .shadow(14.dp, RoundedCornerShape(24.dp), clip = false, ambientColor = TodayCardShadow, spotColor = TodayCardShadow)
             .clip(RoundedCornerShape(24.dp))
             .background(TodaySurface)
-            .clickable(onClick = onClick)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick,
+            )
             .padding(horizontal = 16.dp, vertical = 14.dp),
     ) {
         Row(
