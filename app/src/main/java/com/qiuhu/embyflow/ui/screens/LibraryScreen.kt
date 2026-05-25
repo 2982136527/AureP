@@ -8,7 +8,6 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
@@ -54,8 +53,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
@@ -86,13 +83,20 @@ import com.qiuhu.embyflow.ui.components.LibraryPosterAspectRatio
 import com.qiuhu.embyflow.ui.components.MediaPosterCard
 import com.qiuhu.embyflow.ui.components.MediaPosterCardStyle
 import com.qiuhu.embyflow.ui.components.PixelCatAsyncImage
+import com.qiuhu.embyflow.ui.components.SoftUiAccent
+import com.qiuhu.embyflow.ui.components.SoftUiScrim
+import com.qiuhu.embyflow.ui.components.SoftUiSurfacePressed
+import com.qiuhu.embyflow.ui.components.SoftUiSurfaceStyle
 import com.qiuhu.embyflow.ui.components.pressScale
+import com.qiuhu.embyflow.ui.components.softUiRaisedSurface
+import com.qiuhu.embyflow.ui.components.softUiSurface
 import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun LibraryScreen(
+    isTabActive: Boolean,
     libraries: List<MediaItem>,
     selectedLibraryId: String?,
     layoutMode: String,
@@ -153,11 +157,13 @@ fun LibraryScreen(
     }
 
     LaunchedEffect(
+        isTabActive,
         selectedLibraryId,
         restoredScrollIndex,
         restoredScrollOffset,
         totalGridItems,
     ) {
+        if (!isTabActive) return@LaunchedEffect
         if (selectedLibraryId.isNullOrBlank()) return@LaunchedEffect
         if (totalGridItems <= 0) {
             return@LaunchedEffect
@@ -167,9 +173,11 @@ fun LibraryScreen(
     }
 
     LaunchedEffect(
+        isTabActive,
         gridState,
         selectedLibraryId,
     ) {
+        if (!isTabActive) return@LaunchedEffect
         if (selectedLibraryId.isNullOrBlank()) return@LaunchedEffect
         snapshotFlow {
             gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset
@@ -181,6 +189,7 @@ fun LibraryScreen(
     }
 
     LaunchedEffect(
+        isTabActive,
         gridState,
         libraryItems.size,
         libraryTotalCount,
@@ -188,6 +197,7 @@ fun LibraryScreen(
         isAppending,
         isServerConnected,
     ) {
+        if (!isTabActive) return@LaunchedEffect
         if (!isServerConnected) return@LaunchedEffect
 
         snapshotFlow {
@@ -210,12 +220,14 @@ fun LibraryScreen(
     }
 
     LaunchedEffect(
+        isTabActive,
         gridState,
         libraryItems,
         selectedLibraryId,
         posterAspectRatio,
         gridHorizontalSpacingPx,
     ) {
+        if (!isTabActive) return@LaunchedEffect
         snapshotFlow {
             val lastVisibleIndex = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
             lastVisibleIndex
@@ -511,7 +523,7 @@ private fun LibrarySortSheet(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(EditorialTextPrimary.copy(alpha = 0.16f))
+            .background(SoftUiScrim)
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
@@ -634,7 +646,7 @@ private fun LibrarySelectorCard(
     val imageUrl = library.backdropImageUrl ?: library.primaryImageUrl
     val shape = RoundedCornerShape(16.dp)
     val interactionSource = remember { MutableInteractionSource() }
-    val highlightColor = Color(0xFFD39B5D)
+    val highlightColor = SoftUiAccent
     val cardAspectRatio = 16f / 9f
     val backgroundColor by animateColorAsState(
         targetValue = if (selected) Color(0xFFF2E4D0) else EditorialSurface,
@@ -646,12 +658,6 @@ private fun LibrarySelectorCard(
         animationSpec = tween(durationMillis = 220),
         label = "librarySelectorTitleColor",
     )
-    val borderColor by animateColorAsState(
-        targetValue = if (selected) highlightColor else Color.Transparent,
-        animationSpec = tween(durationMillis = 220),
-        label = "librarySelectorBorderColor",
-    )
-
     Column(
         modifier = Modifier
             .width(cardWidth)
@@ -668,31 +674,16 @@ private fun LibrarySelectorCard(
                     .fillMaxWidth()
                     .padding(2.dp)
                     .aspectRatio(cardAspectRatio)
-                    .shadow(
-                        elevation = if (selected) 18.dp else 12.dp,
+                    .softUiSurface(
                         shape = shape,
-                        clip = false,
-                        ambientColor = if (selected) highlightColor.copy(alpha = 0.18f) else EditorialShadow,
-                        spotColor = if (selected) highlightColor.copy(alpha = 0.18f) else EditorialShadow,
-                    )
-                .clip(shape)
-                .background(backgroundColor)
-                .then(
-                    if (borderColor != Color.Transparent) {
-                        Modifier.border(
-                            width = 2.dp,
-                            color = borderColor,
-                            shape = shape,
-                        )
-                    } else {
-                        Modifier
-                    }
-                ),
+                        style = if (selected) SoftUiSurfaceStyle.Inset else SoftUiSurfaceStyle.Raised,
+                        color = backgroundColor,
+                    ),
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Brush.linearGradient(library.colors)),
+                    .background(SoftUiSurfacePressed),
                 contentAlignment = Alignment.Center,
             ) {
                 PixelCatAsyncImage(

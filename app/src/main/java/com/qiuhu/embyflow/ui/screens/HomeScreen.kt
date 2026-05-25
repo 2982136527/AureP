@@ -78,21 +78,32 @@ import com.qiuhu.embyflow.model.cardEpisodeBadgeLabel
 import com.qiuhu.embyflow.model.MediaItem
 import com.qiuhu.embyflow.model.hasBackdropImage
 import com.qiuhu.embyflow.model.isEpisode
+import com.qiuhu.embyflow.ui.components.EditorialBackground
+import com.qiuhu.embyflow.ui.components.EditorialChip
+import com.qiuhu.embyflow.ui.components.EditorialSurface
+import com.qiuhu.embyflow.ui.components.EditorialSurfaceStrong
+import com.qiuhu.embyflow.ui.components.EditorialTextPrimary
+import com.qiuhu.embyflow.ui.components.EditorialTextSecondary
 import com.qiuhu.embyflow.ui.components.MediaPosterCornerBadge
 import com.qiuhu.embyflow.ui.components.PixelCatAsyncImage
 import com.qiuhu.embyflow.ui.components.pressScale
+import com.qiuhu.embyflow.ui.components.softUiRaisedSurface
+import com.qiuhu.embyflow.ui.components.softUiSurface
+import com.qiuhu.embyflow.ui.components.SoftUiShadowDark
+import com.qiuhu.embyflow.ui.components.SoftUiSurfacePressed
+import com.qiuhu.embyflow.ui.components.SoftUiSurfaceStyle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-private val TodayBackground = Color(0xFFF5F1EA)
-private val TodaySurface = Color(0xFFFBF7F1)
-private val TodaySurfaceStrong = Color(0xFFF0E7DA)
-private val TodayTextPrimary = Color(0xFF161310)
-private val TodayTextSecondary = Color(0xFF6F685F)
-private val TodayCardShadow = Color(0x22000000)
-private val TodayChip = Color(0xFFE8DECF)
-private val TodayAction = Color(0xFFF4EEE5)
+private val TodayBackground = EditorialBackground
+private val TodaySurface = EditorialSurface
+private val TodaySurfaceStrong = EditorialSurfaceStrong
+private val TodayTextPrimary = EditorialTextPrimary
+private val TodayTextSecondary = EditorialTextSecondary
+private val TodayCardShadow = SoftUiShadowDark
+private val TodayChip = EditorialChip
+private val TodayAction = EditorialSurface
 private const val TodayHighlightsAutoScrollResumeDelayMillis = 2200L
 private const val TodayHighlightsAutoScrollPollingMillis = 120L
 private val TodayHighlightsAutoScrollSpeed = 18.dp
@@ -101,6 +112,7 @@ private const val TodayResumeVisibleCards = 1.5f
 
 @Composable
 fun HomeScreen(
+    isTabActive: Boolean,
     layoutMode: String,
     heroItems: List<MediaItem>,
     highlightItems: List<MediaItem>,
@@ -117,18 +129,22 @@ fun HomeScreen(
             .distinctBy { it.id }
             .filter { it.hasBackdropImage() }
     }
-    val highlights = highlightItems.take(8)
     val isLargeLayout = layoutMode == "大图优先"
     val isCompactLayout = layoutMode == "紧凑信息流"
-    val resumeItems = continueWatchingItems
-        .distinctBy { it.continueWatchingDisplayKey() }
-        .take(
-        when {
-            isCompactLayout -> 8
-            isLargeLayout -> 4
-            else -> 6
-        },
-    )
+    val highlights = remember(highlightItems) {
+        highlightItems.take(8)
+    }
+    val resumeItems = remember(continueWatchingItems, isCompactLayout, isLargeLayout) {
+        continueWatchingItems
+            .distinctBy { it.continueWatchingDisplayKey() }
+            .take(
+                when {
+                    isCompactLayout -> 8
+                    isLargeLayout -> 4
+                    else -> 6
+                },
+            )
+    }
     val heroWidthFraction = when {
         isCompactLayout -> 0.72f
         isLargeLayout -> 1f
@@ -198,6 +214,7 @@ fun HomeScreen(
                     contentType = "hero",
                 ) {
                     TodayHeroCarousel(
+                        isTabActive = isTabActive,
                         items = heroRotationPool,
                         cardWidthFraction = heroWidthFraction,
                         cardHeight = heroCardHeight,
@@ -220,6 +237,7 @@ fun HomeScreen(
                         contentType = "highlights",
                     ) {
                         TodayHighlightsRow(
+                            isTabActive = isTabActive,
                             items = highlights,
                             itemSpacing = 8.dp,
                             onOpenMedia = onOpenMedia,
@@ -382,6 +400,7 @@ private fun formatResumeTime(valueMs: Long): String {
 
 @Composable
 private fun TodayHighlightsRow(
+    isTabActive: Boolean,
     items: List<MediaItem>,
     itemSpacing: Dp,
     onOpenMedia: (MediaItem) -> Unit,
@@ -404,8 +423,8 @@ private fun TodayHighlightsRow(
     var lastUserInteractionAt by remember(items) { mutableLongStateOf(SystemClock.uptimeMillis()) }
     var isAutoScrolling by remember { mutableStateOf(false) }
 
-    LaunchedEffect(canAutoScroll, listState) {
-        if (!canAutoScroll) return@LaunchedEffect
+    LaunchedEffect(canAutoScroll, listState, isTabActive) {
+        if (!canAutoScroll || !isTabActive) return@LaunchedEffect
         while (isActive) {
             if (listState.isScrollInProgress && !isAutoScrolling) {
                 lastUserInteractionAt = SystemClock.uptimeMillis()
@@ -414,8 +433,8 @@ private fun TodayHighlightsRow(
         }
     }
 
-    LaunchedEffect(canAutoScroll, listState, lastUserInteractionAt, autoScrollSpeedPx) {
-        if (!canAutoScroll) return@LaunchedEffect
+    LaunchedEffect(canAutoScroll, listState, lastUserInteractionAt, autoScrollSpeedPx, isTabActive) {
+        if (!canAutoScroll || !isTabActive) return@LaunchedEffect
         val idleDuration = SystemClock.uptimeMillis() - lastUserInteractionAt
         val remainingDelay = TodayHighlightsAutoScrollResumeDelayMillis - idleDuration
         if (remainingDelay > 0L) {
@@ -520,9 +539,12 @@ private fun TodayPosterFeatureCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(2f / 3f)
-                .shadow(18.dp, shape, clip = false, ambientColor = TodayCardShadow, spotColor = TodayCardShadow)
-                .clip(shape)
-                .background(Brush.verticalGradient(media.colors)),
+                .softUiRaisedSurface(
+                    shape = shape,
+                    color = TodaySurface,
+                    shadowRadius = 18.dp,
+                    shadowOffset = 8.dp,
+                ),
         ) {
             PixelCatAsyncImage(
                 model = imageUrl,
@@ -568,6 +590,7 @@ private fun TodayPosterFeatureCard(
 
 @Composable
 private fun TodayHeroCarousel(
+    isTabActive: Boolean,
     items: List<MediaItem>,
     cardWidthFraction: Float,
     cardHeight: Dp,
@@ -587,7 +610,8 @@ private fun TodayHeroCarousel(
     var warmedHeroUrls by remember(items) { mutableStateOf(setOf<String>()) }
     val activeItem = rotationOrder.getOrElse(activeIndex) { items.first() }
 
-    LaunchedEffect(items) {
+    LaunchedEffect(items, isTabActive) {
+        if (!isTabActive) return@LaunchedEffect
         rotationOrder = items.shuffledForHeroRotation()
         activeIndex = 0
         while (true) {
@@ -614,7 +638,8 @@ private fun TodayHeroCarousel(
         val targetWidthPx = with(density) { (maxWidth * cardWidthFraction).roundToPx().coerceAtLeast(1) }
         val targetHeightPx = with(density) { cardHeight.roundToPx().coerceAtLeast(1) }
 
-        LaunchedEffect(rotationOrder, activeIndex, targetWidthPx, targetHeightPx) {
+        LaunchedEffect(rotationOrder, activeIndex, targetWidthPx, targetHeightPx, isTabActive) {
+            if (!isTabActive) return@LaunchedEffect
             val upcomingUrls = buildList {
                 val limit = minOf(TodayHeroPrefetchCount, rotationOrder.size)
                 repeat(limit) { offset ->
@@ -748,6 +773,7 @@ private fun TodayFeatureCard(
     onClick: () -> Unit,
 ) {
     val shape = RoundedCornerShape(16.dp)
+    val imageShape = RoundedCornerShape(13.dp)
     val imageUrl = imageUrlOverride ?: (media.backdropImageUrl ?: media.primaryImageUrl)
     val badgeLabel = media.cardEpisodeBadgeLabel()
     val interactionSource = remember { MutableInteractionSource() }
@@ -766,30 +792,41 @@ private fun TodayFeatureCard(
         modifier = modifier
             .then(cardSizeModifier)
             .pressScale(interactionSource)
-            .shadow(22.dp, shape, clip = false, ambientColor = TodayCardShadow, spotColor = TodayCardShadow)
-            .clip(shape)
-            .background(Brush.verticalGradient(media.colors))
+            .softUiRaisedSurface(
+                shape = shape,
+                color = TodaySurface,
+                shadowRadius = 14.dp,
+                shadowOffset = 5.dp,
+            )
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
                 onClick = onClick,
             ),
     ) {
-        PixelCatAsyncImage(
-            model = imageUrl,
-            contentDescription = media.title,
-            modifier = Modifier.fillMaxSize(),
-            contentScale = imageContentScale,
-            onSuccess = { state ->
-                if (adaptCardToImage) {
-                    val width = state.result.drawable.intrinsicWidth
-                    val heightPx = state.result.drawable.intrinsicHeight
-                    if (width > 0 && heightPx > 0) {
-                        imageAspectRatio = width.toFloat() / heightPx.toFloat()
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(2.dp)
+                .clip(imageShape)
+                .background(SoftUiSurfacePressed),
+        ) {
+            PixelCatAsyncImage(
+                model = imageUrl,
+                contentDescription = media.title,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = imageContentScale,
+                onSuccess = { state ->
+                    if (adaptCardToImage) {
+                        val width = state.result.drawable.intrinsicWidth
+                        val heightPx = state.result.drawable.intrinsicHeight
+                        if (width > 0 && heightPx > 0) {
+                            imageAspectRatio = width.toFloat() / heightPx.toFloat()
+                        }
                     }
-                }
-            },
-        )
+                },
+            )
+        }
 
         if (!topLeftLabel.isNullOrBlank()) {
             if (plainTopLabels) {
@@ -830,16 +867,7 @@ private fun TodayFeatureCard(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        listOf(
-                            Color.Transparent,
-                            Color.Transparent,
-                            Color(0x1A000000),
-                            Color(0xB8000000),
-                        ),
-                    ),
-                ),
+                .background(Color.Transparent),
         )
 
         Column(
@@ -865,15 +893,15 @@ private fun TodayTopOverlayLabel(
 ) {
     Text(
         text = text,
-        modifier = modifier,
-        style = MaterialTheme.typography.labelSmall.copy(
-            shadow = Shadow(
-                color = Color.Black.copy(alpha = 0.55f),
-                offset = Offset(0f, 1.5f),
-                blurRadius = 6f,
-            ),
-        ),
-        color = Color.White,
+        modifier = modifier
+            .softUiSurface(
+                shape = RoundedCornerShape(999.dp),
+                style = SoftUiSurfaceStyle.Raised,
+                color = TodaySurfaceStrong,
+            )
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        style = MaterialTheme.typography.labelSmall,
+        color = TodayTextPrimary,
         fontWeight = FontWeight.Bold,
         maxLines = 1,
     )
@@ -887,21 +915,32 @@ private fun TodayCardFooter(
     preferTitleLogo: Boolean = false,
     topLeftLabel: String? = null,
 ) {
+    val logoModel = when {
+        preferTitleLogo && media.isEpisode -> media.seriesTitleLogoUrl ?: media.titleLogoUrl
+        preferTitleLogo -> media.titleLogoUrl
+        else -> null
+    }
+    val shouldUseSurface = !transparent && logoModel.isNullOrBlank()
+    val overlayTitleColor = if (transparent) Color.White else TodayTextPrimary
+    val overlayMetaColor = if (transparent) Color.White.copy(alpha = 0.82f) else TodayTextSecondary
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .then(
-                if (transparent) {
-                    Modifier
+                if (shouldUseSurface) {
+                    Modifier.softUiSurface(
+                        shape = RoundedCornerShape(if (compact) 14.dp else 16.dp),
+                        style = SoftUiSurfaceStyle.Inset,
+                        color = TodaySurfaceStrong,
+                    )
                 } else {
                     Modifier
-                        .clip(RoundedCornerShape(if (compact) 14.dp else 16.dp))
-                        .background(if (compact) Color(0x66FFFFFF) else Color(0x73FFFFFF))
-                }
+                },
             )
             .padding(
-                horizontal = if (transparent) 0.dp else if (compact) 12.dp else 14.dp,
-                vertical = if (transparent) 0.dp else if (compact) 7.dp else 8.dp,
+                horizontal = if (compact) 12.dp else 14.dp,
+                vertical = if (compact) 7.dp else 8.dp,
             ),
     ) {
         Column(
@@ -912,10 +951,9 @@ private fun TodayCardFooter(
                 val secondaryEpisodeTitle = media.title.takeIf {
                     it.isNotBlank() && it != primaryEpisodeTitle
                 }
-                val episodeLogoModel = media.seriesTitleLogoUrl ?: media.titleLogoUrl
-                if (!episodeLogoModel.isNullOrBlank()) {
+                if (!logoModel.isNullOrBlank()) {
                     TodayCardLogo(
-                        model = episodeLogoModel,
+                        model = logoModel,
                         contentDescription = primaryEpisodeTitle,
                         compact = compact,
                     )
@@ -923,7 +961,7 @@ private fun TodayCardFooter(
                     Text(
                         text = primaryEpisodeTitle,
                         style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
-                        color = Color.White,
+                        color = overlayTitleColor,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -933,7 +971,7 @@ private fun TodayCardFooter(
                     Text(
                         text = episodeTitle,
                         style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
-                        color = Color.White,
+                        color = overlayTitleColor,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -944,13 +982,14 @@ private fun TodayCardFooter(
                     media = media,
                     compact = compact,
                     preferTitleLogo = preferTitleLogo,
+                    textColor = overlayTitleColor,
                 )
             }
             if (topLeftLabel.isNullOrBlank()) {
                 Text(
                     text = media.subtitle.ifBlank { media.meta },
                     style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.bodySmall,
-                    color = Color.White.copy(alpha = 0.78f),
+                    color = overlayMetaColor,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -964,12 +1003,14 @@ private fun TodayCardTitle(
     media: MediaItem,
     compact: Boolean = false,
     preferTitleLogo: Boolean = false,
+    textColor: Color = TodayTextPrimary,
 ) {
     if (preferTitleLogo && media.titleLogoUrl != null) {
         TodayCardLogo(
             model = media.titleLogoUrl,
             contentDescription = media.title,
             compact = compact,
+            fallbackTextColor = textColor,
         )
         return
     }
@@ -977,7 +1018,7 @@ private fun TodayCardTitle(
     Text(
         text = media.title,
         style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
-        color = Color.White,
+        color = textColor,
         fontWeight = FontWeight.SemiBold,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
@@ -989,6 +1030,7 @@ private fun TodayCardLogo(
     model: Any?,
     contentDescription: String?,
     compact: Boolean,
+    fallbackTextColor: Color = TodayTextPrimary,
 ) {
     SubcomposeAsyncImage(
         model = model,
@@ -1007,7 +1049,7 @@ private fun TodayCardLogo(
             Text(
                 text = contentDescription.orEmpty(),
                 style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
-                color = Color.White,
+                color = fallbackTextColor,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1025,9 +1067,10 @@ private fun TodayInfoCard(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp)
-            .shadow(16.dp, RoundedCornerShape(28.dp), clip = false, ambientColor = TodayCardShadow, spotColor = TodayCardShadow)
-            .clip(RoundedCornerShape(28.dp))
-            .background(TodaySurface)
+            .softUiRaisedSurface(
+                shape = RoundedCornerShape(28.dp),
+                color = TodaySurface,
+            )
             .padding(horizontal = 18.dp, vertical = 18.dp),
     ) {
         Row(
@@ -1077,9 +1120,10 @@ private fun TodayLibraryRow(
             .fillMaxWidth()
             .padding(horizontal = 16.dp)
             .pressScale(interactionSource)
-            .shadow(14.dp, RoundedCornerShape(24.dp), clip = false, ambientColor = TodayCardShadow, spotColor = TodayCardShadow)
-            .clip(RoundedCornerShape(24.dp))
-            .background(TodaySurface)
+            .softUiRaisedSurface(
+                shape = RoundedCornerShape(24.dp),
+                color = TodaySurface,
+            )
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
@@ -1095,8 +1139,11 @@ private fun TodayLibraryRow(
                 modifier = Modifier
                     .width(116.dp)
                     .aspectRatio(16f / 9f)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(Brush.linearGradient(media.colors)),
+                    .softUiSurface(
+                        shape = RoundedCornerShape(14.dp),
+                        style = SoftUiSurfaceStyle.Inset,
+                        color = SoftUiSurfacePressed,
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
                 PixelCatAsyncImage(

@@ -3,6 +3,7 @@ package com.qiuhu.embyflow.ui.components
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CollectionsBookmark
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -21,12 +23,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -48,8 +48,11 @@ fun MediaPosterCornerBadge(
 ) {
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(999.dp))
-            .background(Color(0xFFF2E4D3).copy(alpha = 0.94f))
+            .softUiSurface(
+                shape = RoundedCornerShape(999.dp),
+                style = SoftUiSurfaceStyle.Raised,
+                color = SoftUiSurfaceRaised,
+            )
             .padding(horizontal = 8.dp, vertical = 5.dp),
     ) {
         Text(
@@ -73,8 +76,10 @@ fun MediaPosterCard(
     onClick: (() -> Unit)? = null,
 ) {
     val shape = RoundedCornerShape(if (compact) 14.dp else 16.dp)
+    val posterShape = RoundedCornerShape(if (compact) 11.dp else 13.dp)
     val isLibraryStyle = style == MediaPosterCardStyle.Library
     val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
 
     if (isLibraryStyle && titleBelow) {
         Column(
@@ -98,16 +103,37 @@ fun MediaPosterCard(
                     .fillMaxWidth()
                     .aspectRatio(LibraryPosterAspectRatio)
                     .heightIn(max = if (compact) 240.dp else 320.dp)
-                    .shadow(16.dp, shape, clip = false, ambientColor = EditorialShadow, spotColor = EditorialShadow)
-                    .clip(shape)
-                    .background(Brush.linearGradient(media.colors)),
+                    .then(
+                        if (pressed && onClick != null) {
+                            Modifier.softUiSurface(
+                                shape = shape,
+                                style = SoftUiSurfaceStyle.Inset,
+                                color = SoftUiSurfacePressed,
+                            )
+                        } else {
+                            Modifier.softUiRaisedSurface(
+                                shape = shape,
+                                color = EditorialSurface,
+                                shadowRadius = 13.dp,
+                                shadowOffset = 5.dp,
+                            )
+                        },
+                    ),
             ) {
-                PixelCatAsyncImage(
-                    model = media.primaryImageUrl,
-                    contentDescription = media.title,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop,
-                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(2.dp)
+                        .clip(posterShape)
+                        .background(SoftUiSurfacePressed),
+                ) {
+                    PixelCatAsyncImage(
+                        model = media.primaryImageUrl,
+                        contentDescription = media.title,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                    )
+                }
 
                 if (!topRightLabel.isNullOrBlank()) {
                     MediaPosterCornerBadge(
@@ -169,28 +195,27 @@ fun MediaPosterCard(
                             Modifier
                         }
                     )
-                    .background(Brush.linearGradient(media.colors)),
+                    .background(SoftUiSurfacePressed),
             ) {
-                PixelCatAsyncImage(
-                    model = media.primaryImageUrl,
-                    contentDescription = media.title,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop,
-                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(2.dp)
+                        .clip(posterShape)
+                        .background(SoftUiSurfacePressed),
+                ) {
+                    PixelCatAsyncImage(
+                        model = media.primaryImageUrl,
+                        contentDescription = media.title,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                    )
+                }
 
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(
-                                    Color.Transparent,
-                                    Color.Transparent,
-                                    Color(0x26000000),
-                                    Color(0xB0000000),
-                                ),
-                            ),
-                        ),
+                        .background(Color.Transparent),
                 )
 
                 Text(
@@ -202,7 +227,7 @@ fun MediaPosterCard(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     fontWeight = FontWeight.SemiBold,
-                    color = Color.White,
+                    color = EditorialTextPrimary,
                 )
 
                 if (!topRightLabel.isNullOrBlank()) {
@@ -222,36 +247,38 @@ fun MediaPosterCard(
                     modifier = Modifier
                         .fillMaxWidth()
                         .aspectRatio(if (compact) 1.18f else 0.78f)
-                        .background(Brush.linearGradient(media.colors)),
+                        .background(SoftUiSurfacePressed),
                 ) {
-                    PixelCatAsyncImage(
-                        model = media.primaryImageUrl,
-                        contentDescription = media.title,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop,
-                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(2.dp)
+                            .clip(posterShape)
+                            .background(SoftUiSurfacePressed),
+                    ) {
+                        PixelCatAsyncImage(
+                            model = media.primaryImageUrl,
+                            contentDescription = media.title,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop,
+                        )
+                    }
 
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(
-                                Brush.verticalGradient(
-                                    listOf(
-                                        Color.Transparent,
-                                        Color.Transparent,
-                                        Color(0x12000000),
-                                        Color(0x72000000),
-                                    ),
-                                ),
-                            ),
+                            .background(Color.Transparent),
                     )
 
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(12.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(Color.White.copy(alpha = 0.86f))
+                            .softUiSurface(
+                                shape = RoundedCornerShape(14.dp),
+                                style = SoftUiSurfaceStyle.Raised,
+                                color = SoftUiSurfaceRaised,
+                            )
                             .padding(horizontal = 10.dp, vertical = 8.dp),
                     ) {
                         Icon(

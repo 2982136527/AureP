@@ -155,6 +155,10 @@ import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_KOREAN
 import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_SIMPLIFIED_CHINESE
 import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_TRADITIONAL_CHINESE
 import com.qiuhu.embyflow.ui.theme.AppTitleFontFamily
+import com.qiuhu.embyflow.ui.components.SoftUiSurfaceStyle
+import com.qiuhu.embyflow.ui.components.softUiInsetSurface
+import com.qiuhu.embyflow.ui.components.softUiRaisedSurface
+import com.qiuhu.embyflow.ui.components.softUiSurface
 import `is`.xyz.mpv.MPVLib
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
@@ -171,8 +175,15 @@ import org.chromium.net.CronetEngine
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
-private val PlayerAccentColor = Color(0xFFF0E7DA)
-private val PlayerPanelColor = Color(0xCC101010)
+private val SoftUiAccent = Color(0xFFD7DCE5)
+private val EditorialSurface = Color(0xFF1D2128)
+private val EditorialSurfaceStrong = Color(0xFF15181E)
+private val SoftUiSurfacePressed = Color(0xFF0F1217)
+private val SoftUiTextPrimary = Color(0xFFF2F5F8)
+private val SoftUiTextSecondary = Color(0xFF9AA4B0)
+
+private val PlayerAccentColor = SoftUiAccent
+private val PlayerPanelColor = EditorialSurfaceStrong
 private const val PlayerDebugTag = "AurePPlayer"
 private const val DualBackendExoCompanionDelayFastMs = 1_400L
 private const val DualBackendExoCompanionDelayBalancedMs = 1_800L
@@ -2405,7 +2416,6 @@ fun PlayerScreen(
             modifier = Modifier.align(Alignment.Center),
         ) {
             PlayerLoadingOverlay(
-                label = "正在缓冲",
                 detail = formatBitrate(bitrateEstimateBitsPerSecond),
             )
         }
@@ -2815,7 +2825,7 @@ private fun PlayerTopTitleOverlay(
                 } else {
                     MaterialTheme.typography.bodyMedium
                 }.copy(fontFamily = AppTitleFontFamily),
-                color = Color.White,
+                color = SoftUiTextPrimary,
                 fontWeight = FontWeight.Bold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -2838,7 +2848,7 @@ private fun PlayerEpisodeTitleOverlay(
         } else {
             MaterialTheme.typography.titleSmall
         },
-        color = Color.White.copy(alpha = 0.94f),
+        color = SoftUiTextPrimary,
         fontWeight = FontWeight.SemiBold,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
@@ -2861,8 +2871,10 @@ private fun PlayerTopBar(
     ) {
         Box(
             modifier = Modifier
-                .clip(RoundedCornerShape(22.dp))
-                .background(PlayerPanelColor)
+                .softUiRaisedSurface(
+                    shape = RoundedCornerShape(22.dp),
+                    color = PlayerPanelColor,
+                )
                 .padding(horizontal = 6.dp, vertical = 6.dp),
         ) {
             PlayerOverlayIconButton(
@@ -2906,8 +2918,10 @@ private fun PlayerSidePills(
             modifier = Modifier
                 .align(Alignment.CenterStart)
                 .padding(start = 20.dp)
-                .clip(RoundedCornerShape(22.dp))
-                .background(PlayerPanelColor)
+                .softUiRaisedSurface(
+                    shape = RoundedCornerShape(22.dp),
+                    color = PlayerPanelColor,
+                )
                 .padding(vertical = 10.dp, horizontal = 10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -2938,8 +2952,10 @@ private fun PlayerSidePills(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .padding(end = 20.dp)
-                .clip(RoundedCornerShape(22.dp))
-                .background(PlayerPanelColor)
+                .softUiRaisedSurface(
+                    shape = RoundedCornerShape(22.dp),
+                    color = PlayerPanelColor,
+                )
                 .padding(vertical = 10.dp, horizontal = 10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -2952,7 +2968,7 @@ private fun PlayerSidePills(
             Text(
                 text = formatSpeed(playbackSpeed),
                 style = MaterialTheme.typography.labelLarge,
-                color = Color.White,
+                color = SoftUiTextPrimary,
                 textAlign = TextAlign.Center,
             )
             PlayerOverlayIconButton(
@@ -2990,8 +3006,10 @@ private fun PlayerBottomControls(
         modifier = modifier
             .fillMaxWidth()
             .widthIn(max = 460.dp)
-            .clip(RoundedCornerShape(22.dp))
-            .background(Color(0xE0101010))
+            .softUiRaisedSurface(
+                shape = RoundedCornerShape(22.dp),
+                color = PlayerPanelColor,
+            )
             .padding(
                 horizontal = if (compact) 12.dp else 16.dp,
                 vertical = if (compact) 4.dp else 6.dp,
@@ -3018,12 +3036,12 @@ private fun PlayerBottomControls(
                 Text(
                     text = formatPlaybackTime(currentPositionMs),
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color.White.copy(alpha = 0.82f),
+                    color = SoftUiTextSecondary,
                 )
                 Text(
                     text = "-${formatPlaybackTime((durationMs - currentPositionMs).coerceAtLeast(0L))}",
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color.White.copy(alpha = 0.82f),
+                    color = SoftUiTextSecondary,
                 )
             }
         }
@@ -3137,21 +3155,23 @@ private fun PlayerProgressBar(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(2.dp)
-                .clip(RoundedCornerShape(999.dp))
-                .background(Color.White.copy(alpha = 0.08f)),
+                .height(10.dp)
+                .softUiInsetSurface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = SoftUiSurfacePressed,
+                ),
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth(bufferedFraction)
-                    .height(2.dp)
-                    .background(Color.White.copy(alpha = 0.24f)),
+                    .height(10.dp)
+                    .background(SoftUiTextSecondary.copy(alpha = 0.18f)),
             )
             Box(
                 modifier = Modifier
                     .fillMaxWidth(progressFraction)
-                    .height(2.dp)
-                    .background(Color.White.copy(alpha = 0.92f)),
+                    .height(10.dp)
+                    .background(PlayerAccentColor),
             )
         }
 
@@ -3165,8 +3185,12 @@ private fun PlayerProgressBar(
                     },
                 )
                 .size(handleSize)
-                .clip(CircleShape)
-                .background(Color.White),
+                .softUiRaisedSurface(
+                    shape = CircleShape,
+                    color = EditorialSurface,
+                    shadowRadius = 8.dp,
+                    shadowOffset = 4.dp,
+                ),
         )
     }
 }
@@ -3201,8 +3225,10 @@ private fun PlayerTrackSheet(
             .fillMaxWidth()
             .widthIn(max = 420.dp)
             .heightIn(max = 420.dp)
-            .clip(RoundedCornerShape(26.dp))
-            .background(Color(0xEE111111))
+            .softUiRaisedSurface(
+                shape = RoundedCornerShape(26.dp),
+                color = PlayerPanelColor,
+            )
             .verticalScroll(scrollState)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -3210,13 +3236,13 @@ private fun PlayerTrackSheet(
         Text(
             text = "播放信息",
             style = MaterialTheme.typography.titleMedium,
-            color = Color.White,
+            color = SoftUiTextPrimary,
             fontWeight = FontWeight.SemiBold,
         )
         Text(
             text = title,
             style = MaterialTheme.typography.bodyLarge,
-            color = Color.White,
+            color = SoftUiTextPrimary,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
@@ -3224,7 +3250,7 @@ private fun PlayerTrackSheet(
             Text(
                 text = infoLine,
                 style = MaterialTheme.typography.bodySmall,
-                color = Color.White.copy(alpha = 0.68f),
+                color = SoftUiTextSecondary,
             )
         }
         PlayerInfoFieldRow(label = "当前音轨", value = audioChoiceLabel)
@@ -3276,8 +3302,10 @@ private fun PlayerRuntimeSheet(
             .fillMaxWidth()
             .widthIn(max = 360.dp)
             .heightIn(max = 440.dp)
-            .clip(RoundedCornerShape(26.dp))
-            .background(Color(0xEE111111))
+            .softUiRaisedSurface(
+                shape = RoundedCornerShape(26.dp),
+                color = PlayerPanelColor,
+            )
             .verticalScroll(scrollState)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -3285,7 +3313,7 @@ private fun PlayerRuntimeSheet(
         Text(
             text = "播放方式",
             style = MaterialTheme.typography.titleMedium,
-            color = Color.White,
+            color = SoftUiTextPrimary,
             fontWeight = FontWeight.SemiBold,
         )
         PlayerInfoFieldRow(label = "播放策略", value = runtimeLabel)
@@ -3311,12 +3339,12 @@ private fun PlayerRuntimeSheet(
         Text(
             text = runtimeModeDescription(runtimeLabel),
             style = MaterialTheme.typography.bodySmall,
-            color = Color.White.copy(alpha = 0.68f),
+            color = SoftUiTextSecondary,
         )
         Text(
             text = "串流方式",
             style = MaterialTheme.typography.labelLarge,
-            color = Color.White.copy(alpha = 0.88f),
+            color = SoftUiTextPrimary,
             fontWeight = FontWeight.SemiBold,
         )
         streamOptions.forEach { option ->
@@ -3338,8 +3366,10 @@ private fun PlayerSubtitleSheet(
         modifier = Modifier
             .fillMaxWidth()
             .widthIn(max = 320.dp)
-            .clip(RoundedCornerShape(26.dp))
-            .background(Color(0xEE111111))
+            .softUiRaisedSurface(
+                shape = RoundedCornerShape(26.dp),
+                color = PlayerPanelColor,
+            )
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -3362,7 +3392,11 @@ private fun PlayerSheetRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
+            .softUiSurface(
+                shape = RoundedCornerShape(18.dp),
+                style = SoftUiSurfaceStyle.Raised,
+                color = EditorialSurface,
+            )
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -3371,14 +3405,16 @@ private fun PlayerSheetRow(
         Box(
             modifier = Modifier
                 .size(36.dp)
-                .clip(CircleShape)
-                .background(Color(0x66242424)),
+                .softUiRaisedSurface(
+                    shape = CircleShape,
+                    color = EditorialSurfaceStrong,
+                ),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = Color.White,
+                tint = SoftUiTextPrimary,
             )
         }
         Column(
@@ -3388,14 +3424,14 @@ private fun PlayerSheetRow(
             Text(
                 text = title,
                 style = MaterialTheme.typography.bodyLarge,
-                color = Color.White,
+                color = SoftUiTextPrimary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.bodySmall,
-                color = Color.White.copy(alpha = 0.68f),
+                color = SoftUiTextSecondary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -3412,13 +3448,10 @@ private fun StreamOptionRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
-            .background(
-                if (selected) {
-                    Color.White.copy(alpha = 0.12f)
-                } else {
-                    Color.White.copy(alpha = 0.04f)
-                },
+            .softUiSurface(
+                shape = RoundedCornerShape(18.dp),
+                style = if (selected) SoftUiSurfaceStyle.Inset else SoftUiSurfaceStyle.Raised,
+                color = if (selected) SoftUiSurfacePressed else EditorialSurface,
             )
             .clickable(enabled = !option.lockedByServer && !selected, onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 10.dp),
@@ -3428,16 +3461,17 @@ private fun StreamOptionRow(
         Box(
             modifier = Modifier
                 .size(30.dp)
-                .clip(CircleShape)
-                .background(
-                    if (selected) PlayerAccentColor.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.08f),
+                .softUiSurface(
+                    shape = CircleShape,
+                    style = if (selected) SoftUiSurfaceStyle.Inset else SoftUiSurfaceStyle.Raised,
+                    color = if (selected) PlayerAccentColor.copy(alpha = 0.72f) else EditorialSurfaceStrong,
                 ),
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 text = if (selected) "选" else "流",
                 style = MaterialTheme.typography.labelSmall,
-                color = Color.White,
+                color = SoftUiTextPrimary,
                 fontWeight = FontWeight.Bold,
             )
         }
@@ -3448,7 +3482,7 @@ private fun StreamOptionRow(
             Text(
                 text = option.label,
                 style = MaterialTheme.typography.bodyLarge,
-                color = Color.White,
+                color = SoftUiTextPrimary,
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
@@ -3458,7 +3492,7 @@ private fun StreamOptionRow(
                     option.description
                 },
                 style = MaterialTheme.typography.bodySmall,
-                color = Color.White.copy(alpha = 0.68f),
+                color = SoftUiTextSecondary,
             )
         }
     }
@@ -3478,13 +3512,13 @@ private fun PlayerInfoFieldRow(
         Text(
             text = label,
             style = MaterialTheme.typography.bodySmall,
-            color = Color.White.copy(alpha = 0.52f),
+            color = SoftUiTextSecondary,
             modifier = Modifier.widthIn(min = 72.dp),
         )
         Text(
             text = value,
             style = MaterialTheme.typography.bodyMedium,
-            color = Color.White,
+            color = SoftUiTextPrimary,
             modifier = Modifier.weight(1f),
             maxLines = if (multiline) 4 else 1,
             overflow = TextOverflow.Ellipsis,
@@ -3500,8 +3534,10 @@ private fun PlayerStatusBadge(
 ) {
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(999.dp))
-            .background(PlayerPanelColor)
+            .softUiRaisedSurface(
+                shape = RoundedCornerShape(999.dp),
+                color = PlayerPanelColor,
+            )
             .padding(horizontal = 14.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -3515,7 +3551,7 @@ private fun PlayerStatusBadge(
                 else -> "获取中"
             },
             style = MaterialTheme.typography.labelLarge,
-            color = Color.White,
+            color = SoftUiTextPrimary,
         )
     }
 }
@@ -3527,8 +3563,10 @@ private fun PlayerGestureOverlay(
     Column(
         modifier = Modifier
             .widthIn(min = 220.dp)
-            .clip(RoundedCornerShape(30.dp))
-            .background(Color(0xD20B0B0C))
+            .softUiRaisedSurface(
+                shape = RoundedCornerShape(30.dp),
+                color = PlayerPanelColor,
+            )
             .padding(horizontal = 24.dp, vertical = 22.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -3536,8 +3574,10 @@ private fun PlayerGestureOverlay(
         Box(
             modifier = Modifier
                 .size(52.dp)
-                .clip(CircleShape)
-                .background(Color.White.copy(alpha = 0.08f)),
+                .softUiRaisedSurface(
+                    shape = CircleShape,
+                    color = EditorialSurface,
+                ),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
@@ -3550,26 +3590,28 @@ private fun PlayerGestureOverlay(
         Text(
             text = state.title,
             style = MaterialTheme.typography.titleMedium,
-            color = Color.White,
+            color = SoftUiTextPrimary,
             fontWeight = FontWeight.SemiBold,
         )
         Text(
             text = state.detail,
             style = MaterialTheme.typography.bodySmall,
-            color = Color.White.copy(alpha = 0.68f),
+            color = SoftUiTextSecondary,
         )
         state.progress?.let { progress ->
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(3.dp)
-                    .clip(RoundedCornerShape(999.dp))
-                    .background(Color.White.copy(alpha = 0.08f)),
+                    .height(8.dp)
+                    .softUiInsetSurface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = SoftUiSurfacePressed,
+                    ),
             ) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth(progress.coerceIn(0f, 1f))
-                        .height(3.dp)
+                        .height(8.dp)
                         .background(PlayerAccentColor),
                 )
             }
@@ -3579,31 +3621,22 @@ private fun PlayerGestureOverlay(
 
 @Composable
 private fun PlayerLoadingOverlay(
-    label: String,
     detail: String?,
 ) {
     Column(
         modifier = Modifier
-            .widthIn(min = 224.dp)
-            .clip(RoundedCornerShape(30.dp))
-            .background(Color(0xD20B0B0C))
-            .padding(horizontal = 24.dp, vertical = 22.dp),
+            .padding(horizontal = 18.dp, vertical = 14.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         PlayerLoadingIndicator(
-            modifier = Modifier.size(68.dp),
+            modifier = Modifier.size(62.dp),
         )
         Text(
-            text = label,
-            style = MaterialTheme.typography.titleMedium,
-            color = Color.White,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-            text = detail ?: "正在建立流连接",
-            style = MaterialTheme.typography.bodySmall,
-            color = Color.White.copy(alpha = 0.68f),
+            text = detail ?: "测速中",
+            style = MaterialTheme.typography.labelMedium,
+            color = Color.White.copy(alpha = 0.86f),
+            fontWeight = FontWeight.Medium,
         )
     }
 }
@@ -3651,8 +3684,10 @@ private fun PlayerLoadingIndicator(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(8.dp)
-                .clip(CircleShape)
-                .background(Color.White.copy(alpha = 0.05f)),
+                .softUiRaisedSurface(
+                    shape = CircleShape,
+                    color = EditorialSurface,
+                ),
         )
         Row(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -3681,7 +3716,7 @@ private fun PlayerLoadingIndicator(
                             if (index == 1) {
                                 PlayerAccentColor.copy(alpha = 0.96f)
                             } else {
-                                Color.White.copy(alpha = 0.84f - index * 0.14f)
+                                SoftUiTextSecondary.copy(alpha = 0.64f - index * 0.12f)
                             },
                         ),
                 )
@@ -3712,7 +3747,7 @@ private fun PulsingDot(
                 if (active) {
                     PlayerAccentColor.copy(alpha = alpha)
                 } else {
-                    Color.White.copy(alpha = alpha)
+                    SoftUiTextSecondary.copy(alpha = alpha)
                 },
             ),
     )
@@ -3726,9 +3761,10 @@ private fun SubtitleOptionRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
-            .background(
-                if (option.selected) Color(0x33FFFFFF) else Color.Transparent,
+            .softUiSurface(
+                shape = RoundedCornerShape(18.dp),
+                style = if (option.selected) SoftUiSurfaceStyle.Inset else SoftUiSurfaceStyle.Raised,
+                color = if (option.selected) SoftUiSurfacePressed else EditorialSurface,
             )
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 10.dp),
@@ -3742,7 +3778,7 @@ private fun SubtitleOptionRow(
             Text(
                 text = option.title,
                 style = MaterialTheme.typography.bodyLarge,
-                color = Color.White,
+                color = SoftUiTextPrimary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -3750,7 +3786,7 @@ private fun SubtitleOptionRow(
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color.White.copy(alpha = 0.68f),
+                    color = SoftUiTextSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -3760,7 +3796,7 @@ private fun SubtitleOptionRow(
             Text(
                 text = "当前",
                 style = MaterialTheme.typography.labelLarge,
-                color = Color.White,
+                color = SoftUiTextPrimary,
                 fontWeight = FontWeight.SemiBold,
             )
         }
@@ -3776,14 +3812,17 @@ private fun PlayerOverlayIconButton(
     Box(
         modifier = Modifier
             .size(38.dp)
-            .clip(CircleShape)
+            .softUiRaisedSurface(
+                shape = CircleShape,
+                color = EditorialSurface,
+            )
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            tint = Color.White,
+            tint = SoftUiTextPrimary,
         )
     }
 }
@@ -3799,14 +3838,17 @@ private fun PlayerBottomButton(
     Box(
         modifier = Modifier
             .size(containerSize)
-            .clip(CircleShape)
+            .softUiRaisedSurface(
+                shape = CircleShape,
+                color = EditorialSurface,
+            )
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            tint = Color.White,
+            tint = SoftUiTextPrimary,
             modifier = Modifier.size(iconSize),
         )
     }
@@ -4980,14 +5022,16 @@ fun PlayerLoadingScreen(
     ) {
         Box(
             modifier = Modifier
-                .clip(RoundedCornerShape(999.dp))
-                .background(PlayerPanelColor)
+                .softUiRaisedSurface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = PlayerPanelColor,
+                )
                 .padding(horizontal = 12.dp, vertical = 6.dp),
         ) {
             Text(
                 text = "准备播放",
                 style = MaterialTheme.typography.labelLarge,
-                color = PlayerAccentColor,
+                color = SoftUiTextPrimary,
                 fontWeight = FontWeight.SemiBold,
             )
         }
@@ -4999,14 +5043,14 @@ fun PlayerLoadingScreen(
         Text(
             text = "正在准备播放",
             style = MaterialTheme.typography.headlineSmall,
-            color = Color.White,
+            color = EditorialSurface,
             fontWeight = FontWeight.Bold,
             modifier = Modifier.padding(top = 18.dp),
         )
         Text(
             text = title,
             style = MaterialTheme.typography.bodyMedium,
-            color = Color.White.copy(alpha = 0.72f),
+            color = EditorialSurface.copy(alpha = 0.78f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(top = 10.dp),
@@ -5015,7 +5059,7 @@ fun PlayerLoadingScreen(
         Text(
             text = "媒体源、字幕与解码能力匹配中",
             style = MaterialTheme.typography.bodySmall,
-            color = Color.White.copy(alpha = 0.45f),
+            color = EditorialSurface.copy(alpha = 0.55f),
         )
     }
 }

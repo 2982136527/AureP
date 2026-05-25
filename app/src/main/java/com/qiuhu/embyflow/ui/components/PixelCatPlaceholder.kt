@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
@@ -20,14 +19,7 @@ fun PixelCatPlaceholder(
 ) {
     Box(
         modifier = modifier
-            .background(
-                Brush.linearGradient(
-                    listOf(
-                        EditorialChip.copy(alpha = 0.78f),
-                        EditorialSurfaceStrong,
-                    ),
-                ),
-            ),
+            .background(SoftUiSurfacePressed),
         contentAlignment = Alignment.Center,
     ) {
         Image(

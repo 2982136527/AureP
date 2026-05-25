@@ -35,20 +35,23 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.qiuhu.embyflow.data.settings.AppSettings
 import com.qiuhu.embyflow.model.EmbyHomePayload
 import com.qiuhu.embyflow.model.MediaItem
-import com.qiuhu.embyflow.model.isSeries
 import com.qiuhu.embyflow.model.MediaPerson
 import com.qiuhu.embyflow.model.MediaTag
+import com.qiuhu.embyflow.model.isSeries
 import com.qiuhu.embyflow.ui.components.EditorialBackground
 import com.qiuhu.embyflow.ui.components.EditorialCard
 import com.qiuhu.embyflow.ui.components.EditorialTextPrimary
@@ -95,6 +98,7 @@ private sealed interface OverlayDestination {
 
 private const val ErrorToastDurationMillis = 1800L
 private const val TabTraceTag = "AurePTabSwitch"
+private const val TabPrewarmDelayMillis = 450L
 
 @Composable
 fun EmbyFlowApp(
@@ -465,6 +469,18 @@ private fun RootScaffold(
     onOpenLibrary: (MediaItem) -> Unit,
 ) {
     val saveableStateHolder = rememberSaveableStateHolder()
+    val cachedTabs = rememberSaveable(
+        saver = listSaver(
+            save = { tabs -> tabs.map { it.name } },
+            restore = { names ->
+                mutableStateListOf<RootTab>().apply {
+                    addAll(names.map(RootTab::valueOf))
+                }
+            },
+        ),
+    ) {
+        mutableStateListOf(currentTab)
+    }
     var tabSwitchTarget by remember { mutableStateOf<RootTab?>(null) }
     var tabSwitchStartedAt by remember { mutableStateOf<Long?>(null) }
     var transientErrorMessage by remember { mutableStateOf<String?>(null) }
@@ -483,6 +499,9 @@ private fun RootScaffold(
     }
 
     LaunchedEffect(currentTab) {
+        if (currentTab !in cachedTabs) {
+            cachedTabs += currentTab
+        }
         if (tabSwitchTarget != currentTab) return@LaunchedEffect
         withFrameNanos { }
         val startedAt = tabSwitchStartedAt
@@ -495,36 +514,62 @@ private fun RootScaffold(
         tabSwitchStartedAt = null
     }
 
+    LaunchedEffect(isServerConnected, cachedTabs.size) {
+        if (!isServerConnected) return@LaunchedEffect
+        if (cachedTabs.size >= RootTab.entries.size) return@LaunchedEffect
+        delay(TabPrewarmDelayMillis)
+        RootTab.entries.forEach { tab ->
+            if (tab !in cachedTabs) {
+                cachedTabs += tab
+                withFrameNanos { }
+            }
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
-        saveableStateHolder.SaveableStateProvider(key = currentTab.name) {
-            RootTabContent(
-                tab = currentTab,
-                payload = payload,
-                settings = settings,
-                isRefreshingLibrary = isRefreshingLibrary,
-                isAppendingLibrary = isAppendingLibrary,
-                libraryGridState = libraryGridState,
-                libraryScrollSnapshots = libraryScrollSnapshots,
-                appUpdateState = appUpdateState,
-                onRefreshAppUpdate = onRefreshAppUpdate,
-                serverProfilesState = serverProfilesState,
-                onSaveServerProfile = onSaveServerProfile,
-                onDeleteServerProfile = onDeleteServerProfile,
-                onActivateServerProfile = onActivateServerProfile,
-                isServerConnected = isServerConnected,
-                hasConfiguredServer = hasConfiguredServer,
-                onOpenMedia = onOpenMedia,
-                onOpenLibrary = onOpenLibrary,
-                onSelectLibrary = onSelectLibrary,
-                onLoadMoreLibrary = onLoadMoreLibrary,
-                onUpdatePlayerMode = onUpdatePlayerMode,
-                onUpdateEmbeddedSubtitleLanguage = onUpdateEmbeddedSubtitleLanguage,
-                onUpdateExternalSubtitleLanguage = onUpdateExternalSubtitleLanguage,
-                onUpdateLayoutMode = onUpdateLayoutMode,
-                onUpdateShowLibraryCardTitle = onUpdateShowLibraryCardTitle,
-                onUpdateExperimentalDualBackendRace = onUpdateExperimentalDualBackendRace,
-                onUpdateLibrarySortMode = onUpdateLibrarySortMode,
-            )
+        RootTab.entries.forEach { tab ->
+            if (tab !in cachedTabs) return@forEach
+            val isActive = tab == currentTab
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(if (isActive) 0f else -1f)
+                    .graphicsLayer {
+                        alpha = if (isActive) 1f else 0f
+                    },
+            ) {
+                saveableStateHolder.SaveableStateProvider(key = tab.name) {
+                    RootTabContent(
+                        tab = tab,
+                        isActive = isActive,
+                        payload = payload,
+                        settings = settings,
+                        isRefreshingLibrary = isRefreshingLibrary,
+                        isAppendingLibrary = isAppendingLibrary,
+                        libraryGridState = libraryGridState,
+                        libraryScrollSnapshots = libraryScrollSnapshots,
+                        appUpdateState = appUpdateState,
+                        onRefreshAppUpdate = onRefreshAppUpdate,
+                        serverProfilesState = serverProfilesState,
+                        onSaveServerProfile = onSaveServerProfile,
+                        onDeleteServerProfile = onDeleteServerProfile,
+                        onActivateServerProfile = onActivateServerProfile,
+                        isServerConnected = isServerConnected,
+                        hasConfiguredServer = hasConfiguredServer,
+                        onOpenMedia = onOpenMedia,
+                        onOpenLibrary = onOpenLibrary,
+                        onSelectLibrary = onSelectLibrary,
+                        onLoadMoreLibrary = onLoadMoreLibrary,
+                        onUpdatePlayerMode = onUpdatePlayerMode,
+                        onUpdateEmbeddedSubtitleLanguage = onUpdateEmbeddedSubtitleLanguage,
+                        onUpdateExternalSubtitleLanguage = onUpdateExternalSubtitleLanguage,
+                        onUpdateLayoutMode = onUpdateLayoutMode,
+                        onUpdateShowLibraryCardTitle = onUpdateShowLibraryCardTitle,
+                        onUpdateExperimentalDualBackendRace = onUpdateExperimentalDualBackendRace,
+                        onUpdateLibrarySortMode = onUpdateLibrarySortMode,
+                    )
+                }
+            }
         }
 
         AnimatedVisibility(
@@ -565,7 +610,9 @@ private fun RootScaffold(
         }
 
         FloatingNavigationBar(
-            modifier = Modifier.align(Alignment.BottomCenter),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .zIndex(10f),
             selectedTab = currentTab,
             items = listOf(
                 FloatingNavItem(RootTab.Home, "发现", Icons.Rounded.Home),
@@ -592,6 +639,7 @@ private fun RootScaffold(
 @Composable
 private fun RootTabContent(
     tab: RootTab,
+    isActive: Boolean,
     payload: EmbyHomePayload,
     settings: AppSettings,
     isRefreshingLibrary: Boolean,
@@ -620,6 +668,7 @@ private fun RootTabContent(
 ) {
     when (tab) {
         RootTab.Home -> HomeScreen(
+            isTabActive = isActive,
             layoutMode = settings.layoutMode,
             heroItems = if (isServerConnected) payload.heroItems else emptyList(),
             highlightItems = if (isServerConnected) payload.highlightItems else emptyList(),
@@ -632,6 +681,7 @@ private fun RootTabContent(
         )
 
         RootTab.Library -> LibraryScreen(
+            isTabActive = isActive,
             libraries = if (isServerConnected) payload.libraries else emptyList(),
             selectedLibraryId = if (isServerConnected) payload.selectedLibraryId else null,
             layoutMode = settings.layoutMode,
@@ -665,6 +715,7 @@ private fun RootTabContent(
         )
 
         RootTab.Settings -> SettingsScreen(
+            isActive = isActive,
             server = payload.server,
             settings = settings,
             appUpdateState = appUpdateState,

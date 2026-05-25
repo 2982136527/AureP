@@ -2,9 +2,9 @@ package com.qiuhu.embyflow.ui.components
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -21,20 +21,18 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 
-private val NavSurface = Color(0xFFF8F3EC)
-private val NavSelected = Color(0xFFEAE1D5)
-private val NavIcon = Color(0xFF221F1A)
-private val NavIconMuted = Color(0xFF6E685F)
-private val NavShadow = Color(0x22000000)
+private val NavSurface = SoftUiSurface
+private val NavSelected = SoftUiSurfacePressed
+private val NavIcon = SoftUiTextPrimary
+private val NavIconMuted = SoftUiTextSecondary
 val FloatingNavBarHeight = 58.dp
 val FloatingNavBarOuterPadding = 12.dp
 val FloatingNavBarSheetClearance = 16.dp
@@ -68,9 +66,10 @@ fun <T> FloatingNavigationBar(
             modifier = Modifier
                 .weight(1f)
                 .height(FloatingNavBarHeight)
-                .shadow(18.dp, RoundedCornerShape(29.dp), clip = false, ambientColor = NavShadow, spotColor = NavShadow)
-                .clip(RoundedCornerShape(29.dp))
-                .background(NavSurface),
+                .softUiRaisedSurface(
+                    shape = RoundedCornerShape(29.dp),
+                    color = NavSurface,
+                ),
         ) {
             Row(
                 modifier = Modifier
@@ -99,9 +98,10 @@ fun <T> FloatingNavigationBar(
             modifier = Modifier
                 .size(FloatingNavBarHeight)
                 .pressScale(searchInteractionSource)
-                .shadow(18.dp, CircleShape, clip = false, ambientColor = NavShadow, spotColor = NavShadow)
-                .clip(CircleShape)
-                .background(NavSurface)
+                .softUiRaisedSurface(
+                    shape = CircleShape,
+                    color = NavSurface,
+                )
                 .clickable(
                     interactionSource = searchInteractionSource,
                     indication = null,
@@ -127,8 +127,9 @@ private fun NavIconButton(
     onClick: () -> Unit,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
     val backgroundColor = animateColorAsState(
-        targetValue = if (selected) NavSelected else Color.Transparent,
+        targetValue = if (selected) NavSelected else NavSurface,
         animationSpec = tween(durationMillis = 220),
         label = "navBackgroundColor",
     )
@@ -141,8 +142,11 @@ private fun NavIconButton(
     Box(
         modifier = modifier
             .pressScale(interactionSource)
-            .clip(RoundedCornerShape(23.dp))
-            .background(backgroundColor.value)
+            .softUiSurface(
+                shape = RoundedCornerShape(23.dp),
+                style = if (selected || pressed) SoftUiSurfaceStyle.Inset else SoftUiSurfaceStyle.Raised,
+                color = if (pressed) softUiPressedColor(backgroundColor.value) else backgroundColor.value,
+            )
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,

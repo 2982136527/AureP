@@ -52,6 +52,8 @@ import com.qiuhu.embyflow.ui.components.EditorialSurfaceStrong
 import com.qiuhu.embyflow.ui.components.EditorialTextPrimary
 import com.qiuhu.embyflow.ui.components.EditorialTextSecondary
 import com.qiuhu.embyflow.ui.components.PixelCatAsyncImage
+import com.qiuhu.embyflow.ui.components.SoftUiSurfaceStyle
+import com.qiuhu.embyflow.ui.components.SoftUiSurfacePressed
 
 @Composable
 fun SearchOverlay(
@@ -68,7 +70,7 @@ fun SearchOverlay(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(EditorialBackground.copy(alpha = 0.985f)),
+            .background(EditorialBackground),
     ) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
@@ -105,6 +107,7 @@ fun SearchOverlay(
             item {
                 EditorialCard(
                     shape = RoundedCornerShape(24.dp),
+                    surfaceStyle = SoftUiSurfaceStyle.Inset,
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
                 ) {
                     Row(
@@ -335,7 +338,7 @@ private fun SearchResultCard(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Brush.linearGradient(media.colors)),
+                    .background(SoftUiSurfacePressed),
             ) {
                 PixelCatAsyncImage(
                     model = media.primaryImageUrl,

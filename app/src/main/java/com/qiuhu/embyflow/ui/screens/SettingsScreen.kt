@@ -103,6 +103,11 @@ import com.qiuhu.embyflow.ui.components.EditorialTextSecondary
 import com.qiuhu.embyflow.ui.components.FloatingNavBarHeight
 import com.qiuhu.embyflow.ui.components.FloatingNavBarOuterPadding
 import com.qiuhu.embyflow.ui.components.FloatingNavBarSheetClearance
+import com.qiuhu.embyflow.ui.components.SoftUiScrim
+import com.qiuhu.embyflow.ui.components.SoftUiSurfacePressed
+import com.qiuhu.embyflow.ui.components.SoftUiSurfaceStyle
+import com.qiuhu.embyflow.ui.components.SoftUiTextPrimary
+import com.qiuhu.embyflow.ui.components.softUiInsetSurface
 import kotlinx.coroutines.delay
 
 private const val SettingsSheetExitDurationMillis = 220
@@ -131,6 +136,7 @@ private enum class SettingsSheetKey {
 
 @Composable
 fun SettingsScreen(
+    isActive: Boolean,
     server: ServerSnapshot,
     settings: AppSettings,
     appUpdateState: AppUpdateState,
@@ -152,8 +158,11 @@ fun SettingsScreen(
     var renderedSheetModel by remember { mutableStateOf<SettingsSheetModel?>(null) }
     var serverEditorVisible by remember { mutableStateOf(false) }
     var editingServerProfile by remember { mutableStateOf<ServerProfile?>(null) }
+    var hasRequestedAppUpdate by rememberSaveable { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(isActive, hasRequestedAppUpdate) {
+        if (!isActive || hasRequestedAppUpdate) return@LaunchedEffect
+        hasRequestedAppUpdate = true
         onRefreshAppUpdate()
     }
 
@@ -787,9 +796,9 @@ private fun SettingsToggleGroup(
                             checked = row.checked,
                             onCheckedChange = row.onToggle,
                             colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color.White,
+                                checkedThumbColor = SoftUiTextPrimary,
                                 checkedTrackColor = EditorialAccent,
-                                uncheckedThumbColor = Color.White,
+                                uncheckedThumbColor = SoftUiTextPrimary,
                                 uncheckedTrackColor = EditorialChip,
                             ),
                         )
@@ -847,7 +856,7 @@ private fun SettingsSheet(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(EditorialTextPrimary.copy(alpha = 0.18f))
+                    .background(SoftUiScrim)
                     .clickable(onClick = onDismiss),
             )
         }
@@ -952,12 +961,17 @@ private fun SettingsSheet(
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .clip(RoundedCornerShape(18.dp))
-                                            .background(
+                                            .then(
                                                 if (option == model.selectedOption) {
-                                                    EditorialSurfaceStrong
+                                                    Modifier.softUiInsetSurface(
+                                                        shape = RoundedCornerShape(18.dp),
+                                                        color = SoftUiSurfacePressed,
+                                                    )
                                                 } else {
-                                                    EditorialChip.copy(alpha = 0.45f)
+                                                    Modifier.softUiInsetSurface(
+                                                        shape = RoundedCornerShape(18.dp),
+                                                        color = EditorialChip.copy(alpha = 0.72f),
+                                                    )
                                                 },
                                             )
                                             .clickable { model.onSelect?.invoke(option) }
@@ -1404,8 +1418,10 @@ private fun ServerField(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(22.dp))
-                        .background(EditorialChip.copy(alpha = 0.5f))
+                        .softUiInsetSurface(
+                            shape = RoundedCornerShape(22.dp),
+                            color = SoftUiSurfacePressed,
+                        )
                         .padding(horizontal = 16.dp, vertical = 14.dp),
                 ) {
                     if (value.isBlank()) {

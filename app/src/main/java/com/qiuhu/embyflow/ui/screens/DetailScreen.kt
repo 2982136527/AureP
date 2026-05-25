@@ -71,11 +71,15 @@ import com.qiuhu.embyflow.ui.components.EditorialBackground
 import com.qiuhu.embyflow.ui.components.EditorialCard
 import com.qiuhu.embyflow.ui.components.EditorialIconButton
 import com.qiuhu.embyflow.ui.components.EditorialSurface
+import com.qiuhu.embyflow.ui.components.EditorialSurfaceStrong
 import com.qiuhu.embyflow.ui.components.EditorialTextPrimary
 import com.qiuhu.embyflow.ui.components.EditorialTextSecondary
 import com.qiuhu.embyflow.ui.components.MediaPosterCard
 import com.qiuhu.embyflow.ui.components.MediaPosterCardStyle
 import com.qiuhu.embyflow.ui.components.PixelCatAsyncImage
+import com.qiuhu.embyflow.ui.components.SoftUiSurfacePressed
+import com.qiuhu.embyflow.ui.components.SoftUiSurfaceStyle
+import com.qiuhu.embyflow.ui.components.softUiSurface
 import com.qiuhu.embyflow.ui.theme.AppTitleFontFamily
 import kotlin.math.abs
 
@@ -458,8 +462,11 @@ private fun DetailActorCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(0.82f)
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(Brush.linearGradient(listOf(Color(0xFFF0E7DA), Color(0xFFE4D5BF)))),
+                    .softUiSurface(
+                        shape = RoundedCornerShape(18.dp),
+                        style = SoftUiSurfaceStyle.Inset,
+                        color = SoftUiSurfacePressed,
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
                 if (actor.imageUrl != null) {
@@ -645,8 +652,11 @@ private fun DetailHeroCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(displayAspectRatio)
-                .clip(shape)
-                .background(Brush.verticalGradient(media.colors)),
+                .softUiSurface(
+                    shape = shape,
+                    style = SoftUiSurfaceStyle.Raised,
+                    color = EditorialSurface,
+                ),
         ) {
             PixelCatAsyncImage(
                 model = imageUrl,
@@ -675,7 +685,8 @@ private fun DetailHeroCard(
                             listOf(
                                 Color.Transparent,
                                 Color.Transparent,
-                                Color.Black.copy(alpha = 0.62f),
+                                Color.Black.copy(alpha = 0.18f),
+                                Color.Black.copy(alpha = 0.56f),
                             ),
                         ),
                     ),
@@ -688,12 +699,14 @@ private fun DetailHeroCard(
                     .padding(horizontal = 18.dp, vertical = 18.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-            DetailTitleBlock(
-                media = media,
-                modifier = Modifier.fillMaxWidth(0.72f),
-                textColor = Color.White,
-                logoMaxHeight = 82,
-            )
+                DetailTitleBlock(
+                    media = media,
+                    modifier = Modifier
+                        .fillMaxWidth(0.72f)
+                        .padding(horizontal = 2.dp, vertical = 2.dp),
+                    textColor = Color.White,
+                    logoMaxHeight = 82,
+                )
             }
         }
     }
@@ -821,7 +834,8 @@ private fun DetailSeasonChip(
 ) {
     EditorialCard(
         shape = RoundedCornerShape(999.dp),
-        color = if (selected) Color(0xFFF1E4D0) else EditorialSurface,
+        color = if (selected) EditorialSurfaceStrong else EditorialSurface,
+        surfaceStyle = if (selected) SoftUiSurfaceStyle.Inset else SoftUiSurfaceStyle.Raised,
         onClick = onClick,
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
     ) {
@@ -858,8 +872,11 @@ private fun DetailEpisodeCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(Brush.linearGradient(episode.colors)),
+                    .softUiSurface(
+                        shape = RoundedCornerShape(20.dp),
+                        style = SoftUiSurfaceStyle.Inset,
+                        color = SoftUiSurfacePressed,
+                    ),
                 contentAlignment = Alignment.BottomStart,
             ) {
                 PixelCatAsyncImage(
@@ -872,9 +889,16 @@ private fun DetailEpisodeCard(
                 if (isNextUp) {
                     Text(
                         text = "继续看",
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        modifier = Modifier
+                            .padding(horizontal = 10.dp, vertical = 8.dp)
+                            .softUiSurface(
+                                shape = RoundedCornerShape(999.dp),
+                                style = SoftUiSurfaceStyle.Raised,
+                                color = EditorialSurfaceStrong,
+                            )
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
                         style = MaterialTheme.typography.labelSmall,
-                        color = Color.White,
+                        color = EditorialTextPrimary,
                         fontWeight = FontWeight.Bold,
                     )
                 }

@@ -1,20 +1,20 @@
 package com.qiuhu.embyflow.ui.theme
 
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 
-private val AppColorScheme = darkColorScheme(
+private val AppColorScheme = lightColorScheme(
     primary = AccentGreen,
-    onPrimary = ScreenBase,
+    onPrimary = TextPrimary,
     secondary = AccentOrange,
     background = ScreenBase,
     onBackground = TextPrimary,
-    surface = ScreenBase,
+    surface = SurfaceGlass,
     onSurface = TextPrimary,
     surfaceVariant = SurfaceSelected,
     outline = OutlineSoft,
-    scrim = ScreenBase,
+    scrim = OverlayBackdrop,
 )
 
 @Composable
