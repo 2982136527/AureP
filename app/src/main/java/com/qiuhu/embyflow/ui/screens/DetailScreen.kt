@@ -62,6 +62,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import coil.compose.AsyncImage
+import com.qiuhu.embyflow.model.MediaEdition
 import com.qiuhu.embyflow.model.MediaItem
 import com.qiuhu.embyflow.model.MediaPerson
 import com.qiuhu.embyflow.model.MediaTag
@@ -101,6 +102,9 @@ fun DetailScreen(
     onOpenActor: (MediaPerson) -> Unit,
     onSelectSeason: (String) -> Unit,
     onPlayEpisode: (MediaItem) -> Unit,
+    editions: List<MediaEdition> = emptyList(),
+    selectedEditionId: String? = null,
+    onSelectEdition: (String) -> Unit = {},
 ) {
     var summaryDialogVisible by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = summaryDialogVisible) {
@@ -224,7 +228,7 @@ fun DetailScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .nestedScroll(heroScrollConnection),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 18.dp, bottom = 110.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 18.dp, bottom = 150.dp),
             verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {
             item {
@@ -375,7 +379,7 @@ fun DetailScreen(
             }
         }
 
-        Box(
+        Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
@@ -391,7 +395,15 @@ fun DetailScreen(
                 .padding(horizontal = 16.dp)
                 .navigationBarsPadding()
                 .padding(top = 16.dp, bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            if (editions.size > 1) {
+                EditionSelector(
+                    editions = editions,
+                    selectedId = selectedEditionId,
+                    onSelect = onSelectEdition,
+                )
+            }
             DetailPlayButton(
                 label = playButtonLabel,
                 onPlay = { onPlay(playTarget) },
@@ -1094,5 +1106,50 @@ private fun DetailLine(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+    }
+}
+
+@Composable
+private fun EditionSelector(
+    editions: List<MediaEdition>,
+    selectedId: String?,
+    onSelect: (String) -> Unit,
+) {
+    LazyRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items(
+            items = editions,
+            key = { it.id },
+        ) { edition ->
+            val isSelected = edition.id == selectedId
+            val specs = buildList {
+                edition.resolution?.let { add(it) }
+                edition.videoRange?.takeIf { it != "SDR" }?.let { add(it) }
+                edition.videoCodec?.let { add(it.uppercase()) }
+                edition.bitDepth?.takeIf { it > 8 }?.let { add("${it}bit") }
+                edition.audioCodec?.let { add(it.uppercase()) }
+            }
+            val label = if (specs.isEmpty()) {
+                edition.name
+            } else {
+                "${edition.name} · ${specs.joinToString(" · ")}"
+            }
+            EditorialCard(
+                shape = RoundedCornerShape(999.dp),
+                color = if (isSelected) EditorialSurfaceStrong else EditorialSurface,
+                onClick = { onSelect(edition.id) },
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (isSelected) EditorialTextPrimary else EditorialTextSecondary,
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
     }
 }

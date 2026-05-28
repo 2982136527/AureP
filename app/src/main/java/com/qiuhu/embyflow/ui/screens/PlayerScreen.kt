@@ -423,9 +423,6 @@ fun PlayerScreen(
     var showTrackSheet by rememberSaveable {
         mutableStateOf(false)
     }
-    var showRuntimeSheet by rememberSaveable {
-        mutableStateOf(false)
-    }
     var showSubtitleSheet by rememberSaveable {
         mutableStateOf(false)
     }
@@ -1412,7 +1409,6 @@ fun PlayerScreen(
 
     fun toggleSheets(target: PlayerSheet?) {
         showTrackSheet = target == PlayerSheet.Track
-        showRuntimeSheet = target == PlayerSheet.Runtime
         if (target != PlayerSheet.Track) {
             showSubtitleSheet = false
             showAudioSheet = false
@@ -1429,9 +1425,8 @@ fun PlayerScreen(
                 revealControls()
             }
 
-            showTrackSheet || showRuntimeSheet || showSubtitleSheet || showAudioSheet || showSleepTimerSheet || showQueueSheet -> {
+            showTrackSheet || showSubtitleSheet || showAudioSheet || showSleepTimerSheet || showQueueSheet -> {
                 showTrackSheet = false
-                showRuntimeSheet = false
                 showSubtitleSheet = false
                 showAudioSheet = false
                 showSleepTimerSheet = false
@@ -2141,8 +2136,6 @@ fun PlayerScreen(
     DisposableEffect(activity, isLandscapeFullscreen) {
         activity?.window?.let { window ->
             val controller = WindowInsetsControllerCompat(window, window.decorView)
-            controller.systemBarsBehavior =
-                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
 
             activity.requestedOrientation = if (isLandscapeFullscreen) {
                 ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
@@ -2151,8 +2144,12 @@ fun PlayerScreen(
             }
 
             if (isLandscapeFullscreen) {
+                controller.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 controller.hide(WindowInsetsCompat.Type.systemBars())
             } else {
+                controller.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
                 controller.show(WindowInsetsCompat.Type.systemBars())
             }
         }
@@ -2166,13 +2163,12 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(controlsVisible, controlsLocked, isPlaying, showTrackSheet, showRuntimeSheet, showSubtitleSheet, showAudioSheet, showSleepTimerSheet, showQueueSheet) {
+    LaunchedEffect(controlsVisible, controlsLocked, isPlaying, showTrackSheet, showSubtitleSheet, showAudioSheet, showSleepTimerSheet, showQueueSheet) {
         if (
             controlsVisible &&
             !controlsLocked &&
             isPlaying &&
             !showTrackSheet &&
-            !showRuntimeSheet &&
             !showSubtitleSheet &&
             !showAudioSheet &&
             !showSleepTimerSheet &&
@@ -2238,7 +2234,7 @@ fun PlayerScreen(
                         setResizeMode(scaleMode.resizeMode)
                         setBackgroundColor(android.graphics.Color.BLACK)
                         setShutterBackgroundColor(android.graphics.Color.BLACK)
-                        player = requireNotNull(exoPlayer)
+                        player = exoPlayer
                     }
                 },
                 update = { playerView ->
@@ -2258,7 +2254,7 @@ fun PlayerScreen(
                     .graphicsLayer {
                         alpha = if (raceInProgress) 0f else if (activeBackendKind == PlayerBackendKind.Vlc) 1f else 0f
                     },
-                factory = { requireNotNull(vlcPlayer).view },
+                factory = { vlcPlayer?.view ?: android.widget.FrameLayout(it) },
                 update = { playerView ->
                     playerView.visibility = vlcViewVisibility
                 },
@@ -2272,7 +2268,7 @@ fun PlayerScreen(
                     .graphicsLayer {
                         alpha = if (raceInProgress) 0f else if (activeBackendKind == PlayerBackendKind.Mpv) 1f else 0f
                     },
-                factory = { requireNotNull(mpvPlayer).view },
+                factory = { mpvPlayer?.view ?: android.widget.FrameLayout(it) },
                 update = { playerView ->
                     playerView.visibility = mpvViewVisibility
                 },
@@ -2315,7 +2311,6 @@ fun PlayerScreen(
                                 controlsVisible = !controlsVisible
                                 if (!controlsVisible) {
                                     showTrackSheet = false
-                                    showRuntimeSheet = false
                                     showSubtitleSheet = false
                                     showAudioSheet = false
                                     showSleepTimerSheet = false
@@ -2535,7 +2530,6 @@ fun PlayerScreen(
                         onOpenQueue = {
                             showQueueSheet = !showQueueSheet
                             showTrackSheet = false
-                            showRuntimeSheet = false
                             showSubtitleSheet = false
                             showAudioSheet = false
                             showSleepTimerSheet = false
@@ -2555,7 +2549,6 @@ fun PlayerScreen(
                             controlsLocked = true
                             controlsVisible = false
                             showTrackSheet = false
-                            showRuntimeSheet = false
                             showSubtitleSheet = false
                             showAudioSheet = false
                             showSleepTimerSheet = false
@@ -2563,14 +2556,12 @@ fun PlayerScreen(
                         },
                         onToggleSubtitleSheet = {
                             showTrackSheet = false
-                            showRuntimeSheet = false
                             showSubtitleSheet = !showSubtitleSheet
                             showAudioSheet = false
                             showSleepTimerSheet = false
                         },
                         onToggleAudioSheet = {
                             showTrackSheet = false
-                            showRuntimeSheet = false
                             showAudioSheet = !showAudioSheet
                             showSubtitleSheet = false
                             showSleepTimerSheet = false
@@ -2594,7 +2585,6 @@ fun PlayerScreen(
                         },
                         onToggleSleepTimerSheet = {
                             showTrackSheet = false
-                            showRuntimeSheet = false
                             showSubtitleSheet = false
                             showAudioSheet = false
                             showSleepTimerSheet = !showSleepTimerSheet
@@ -2602,7 +2592,7 @@ fun PlayerScreen(
                     )
 
                     AnimatedVisibility(
-                        visible = showTrackSheet || showRuntimeSheet || showSubtitleSheet || showAudioSheet || showSleepTimerSheet,
+                        visible = showTrackSheet || showSubtitleSheet || showAudioSheet || showSleepTimerSheet,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .playerBottomOverlayInsets(isLandscapeFullscreen)
@@ -2655,27 +2645,17 @@ fun PlayerScreen(
                                 bitrateLabel = formatBitrate(bitrateEstimateBitsPerSecond),
                                 redirectProbeState = redirectProbeState,
                                 streamOptions = streamOptions,
-                                entryPlaybackUrl = activeStreamOption.streamUrl,
-                                currentPlaybackUrl = resolvedPlaybackUrl,
-                                infoFields = source.infoFields,
-                            )
-
-                            showRuntimeSheet -> PlayerRuntimeSheet(
-                                runtimeLabel = runtimeProfile.label,
-                                backendLabel = activeBackendLabel,
-                                streamOptions = streamOptions,
                                 selectedStreamOptionId = activeStreamOption.id,
                                 onSelectStreamOption = { optionId ->
-                                    if (optionId == activeStreamOption.id) return@PlayerRuntimeSheet
+                                    if (optionId == activeStreamOption.id) return@PlayerTrackSheet
                                     capturePlaybackState()
                                     selectedStreamOptionId = optionId
                                     reportPlaybackProgressEvent("QualityChange")
                                     revealControls()
                                 },
-                                bitrateLabel = formatBitrate(bitrateEstimateBitsPerSecond),
-                                redirectProbeState = redirectProbeState,
                                 entryPlaybackUrl = activeStreamOption.streamUrl,
                                 currentPlaybackUrl = resolvedPlaybackUrl,
+                                infoFields = source.infoFields,
                             )
 
                             showSleepTimerSheet -> PlayerSleepTimerSheet(
@@ -2722,7 +2702,6 @@ fun PlayerScreen(
                     if (
                         !episodeTitle.isNullOrBlank() &&
                         !showTrackSheet &&
-                        !showRuntimeSheet &&
                         !showSubtitleSheet &&
                         !showAudioSheet &&
                         !showSleepTimerSheet &&
@@ -2798,12 +2777,13 @@ fun PlayerScreen(
                             reportPlaybackProgressEvent("TimeUpdate")
                             revealControls()
                         },
-                        onOpenRuntime = {
-                            if (showRuntimeSheet) {
-                                toggleSheets(null)
-                            } else {
-                                toggleSheets(PlayerSheet.Runtime)
-                            }
+                        showQueueButton = playQueueItems.isNotEmpty(),
+                        onOpenQueue = {
+                            showQueueSheet = !showQueueSheet
+                            showTrackSheet = false
+                            showSubtitleSheet = false
+                            showAudioSheet = false
+                            showSleepTimerSheet = false
                         },
                     )
                 }
@@ -2814,7 +2794,6 @@ fun PlayerScreen(
 
 private enum class PlayerSheet {
     Track,
-    Runtime,
 }
 
 private enum class PlayerScaleMode(
@@ -3159,7 +3138,8 @@ private fun PlayerBottomControls(
     onSeekBack: () -> Unit,
     onPlayPause: () -> Unit,
     onSeekForward: () -> Unit,
-    onOpenRuntime: () -> Unit,
+    showQueueButton: Boolean = false,
+    onOpenQueue: () -> Unit = {},
 ) {
     val safeDuration = durationMs.coerceAtLeast(1L)
     val progressValue = currentPositionMs.coerceIn(0L, safeDuration).toFloat()
@@ -3252,13 +3232,15 @@ private fun PlayerBottomControls(
                 iconSize = if (compact) 20.dp else 18.dp,
                 onClick = onSeekForward,
             )
-            PlayerBottomButton(
-                icon = Icons.Rounded.PlayCircle,
-                contentDescription = "播放方式",
-                containerSize = if (compact) 38.dp else 34.dp,
-                iconSize = if (compact) 20.dp else 18.dp,
-                onClick = onOpenRuntime,
-            )
+            if (showQueueButton) {
+                PlayerBottomButton(
+                    icon = Icons.AutoMirrored.Rounded.QueueMusic,
+                    contentDescription = "选集",
+                    containerSize = if (compact) 38.dp else 34.dp,
+                    iconSize = if (compact) 20.dp else 18.dp,
+                    onClick = onOpenQueue,
+                )
+            }
         }
     }
 }
@@ -3391,7 +3373,7 @@ private fun PlayerProgressBar(
             if (durationMs <= 0L) break
             val fraction = (chapter.startPositionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
             if (fraction <= 0f || fraction >= 1f) continue
-            val markerOffset = with(density) { (trackWidthPx * fraction).toDp() - 0.5.dp }
+            val markerOffset = with(density) { ((trackWidthPx * fraction).toDp() - 0.5.dp).coerceAtLeast(0.dp) }
             Box(
                 modifier = Modifier
                     .align(Alignment.CenterStart)
@@ -3434,6 +3416,8 @@ private fun PlayerTrackSheet(
     bitrateLabel: String?,
     redirectProbeState: RedirectProbeState,
     streamOptions: List<EmbyPlaybackStreamOption>,
+    selectedStreamOptionId: String,
+    onSelectStreamOption: (String) -> Unit,
     entryPlaybackUrl: String,
     currentPlaybackUrl: String,
     infoFields: List<EmbyPlaybackInfoField>,
@@ -3500,86 +3484,25 @@ private fun PlayerTrackSheet(
         infoFields.forEach { field ->
             PlayerInfoFieldRow(label = field.label, value = field.value)
         }
-    }
-}
-
-@Composable
-private fun PlayerRuntimeSheet(
-    runtimeLabel: String,
-    backendLabel: String,
-    streamOptions: List<EmbyPlaybackStreamOption>,
-    selectedStreamOptionId: String,
-    onSelectStreamOption: (String) -> Unit,
-    bitrateLabel: String?,
-    redirectProbeState: RedirectProbeState,
-    entryPlaybackUrl: String,
-    currentPlaybackUrl: String,
-) {
-    val routeState = remember(entryPlaybackUrl, currentPlaybackUrl, streamOptions, redirectProbeState) {
-        resolvePlaybackRouteState(
-            entryPlaybackUrl = entryPlaybackUrl,
-            currentPlaybackUrl = currentPlaybackUrl,
-            streamOptions = streamOptions,
-            redirectProbeState = redirectProbeState,
-        )
-    }
-    val scrollState = rememberScrollState()
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .widthIn(max = 360.dp)
-            .heightIn(max = 440.dp)
-            .softUiRaisedSurface(
-                shape = RoundedCornerShape(26.dp),
-                color = PlayerPanelColor,
-            )
-            .verticalScroll(scrollState)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Text(
-            text = "播放方式",
-            style = MaterialTheme.typography.titleMedium,
-            color = SoftUiTextPrimary,
-            fontWeight = FontWeight.SemiBold,
-        )
-        PlayerInfoFieldRow(label = "播放策略", value = runtimeLabel)
-        PlayerInfoFieldRow(label = "播放内核", value = backendLabel)
-        PlayerInfoFieldRow(label = "链路状态", value = routeState.routeLabel)
-        PlayerInfoFieldRow(label = "传输路径", value = routeState.transportLabel)
-        bitrateLabel?.let { PlayerInfoFieldRow(label = "码率", value = it) }
-        routeState.technicalLabel?.let { label ->
-            PlayerInfoFieldRow(label = "入口重定向", value = label)
-        }
-        PlayerInfoFieldRow(
-            label = if (routeState.isExternalDirect) "当前直链" else "当前链接",
-            value = routeState.currentUrl ?: entryPlaybackUrl,
-            multiline = true,
-        )
-        if (routeState.entryUrl != null && routeState.entryUrl != routeState.currentUrl) {
-            PlayerInfoFieldRow(
-                label = "请求入口",
-                value = routeState.entryUrl,
-                multiline = true,
-            )
-        }
         Text(
             text = runtimeModeDescription(runtimeLabel),
             style = MaterialTheme.typography.bodySmall,
             color = SoftUiTextSecondary,
         )
-        Text(
-            text = "串流方式",
-            style = MaterialTheme.typography.labelLarge,
-            color = SoftUiTextPrimary,
-            fontWeight = FontWeight.SemiBold,
-        )
-        streamOptions.forEach { option ->
-            StreamOptionRow(
-                option = option,
-                selected = option.id == selectedStreamOptionId,
-                onClick = { onSelectStreamOption(option.id) },
+        if (streamOptions.size > 1) {
+            Text(
+                text = "串流方式",
+                style = MaterialTheme.typography.labelLarge,
+                color = SoftUiTextPrimary,
+                fontWeight = FontWeight.SemiBold,
             )
+            streamOptions.forEach { option ->
+                StreamOptionRow(
+                    option = option,
+                    selected = option.id == selectedStreamOptionId,
+                    onClick = { onSelectStreamOption(option.id) },
+                )
+            }
         }
     }
 }

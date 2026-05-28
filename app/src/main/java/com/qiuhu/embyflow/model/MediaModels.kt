@@ -78,6 +78,17 @@ data class MediaPerson(
     val imageUrl: String? = null,
 )
 
+data class MediaEdition(
+    val id: String,
+    val name: String,
+    val videoCodec: String? = null,
+    val audioCodec: String? = null,
+    val resolution: String? = null,
+    val videoRange: String? = null,
+    val bitDepth: Int? = null,
+    val container: String? = null,
+)
+
 enum class MediaTagType {
     Genre,
     Year,

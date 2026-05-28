@@ -138,6 +138,8 @@ fun EmbyFlowApp(
         val serverProfilesState by embyViewModel.serverProfilesState.collectAsStateWithLifecycle()
         val appUpdateState by embyViewModel.appUpdateState.collectAsStateWithLifecycle()
         val availableGenres by embyViewModel.availableGenres.collectAsStateWithLifecycle()
+        val mediaEditions by embyViewModel.mediaEditions.collectAsStateWithLifecycle()
+        val selectedMediaSourceId by embyViewModel.selectedMediaSourceId.collectAsStateWithLifecycle()
         val libraryScrollSnapshots = remember { mutableStateMapOf<String, LibraryScrollSnapshot>() }
         var playbackTransientErrorMessage by rememberSaveable { mutableStateOf<String?>(null) }
         val payload = currentPayload(uiState)
@@ -366,6 +368,11 @@ fun EmbyFlowApp(
                                         embyViewModel.selectSeriesSeason(media.id, seasonId)
                                     },
                                     onPlayEpisode = embyViewModel::openPlayer,
+                                    editions = mediaEditions[media.id].orEmpty(),
+                                    selectedEditionId = selectedMediaSourceId[media.id],
+                                    onSelectEdition = { sourceId ->
+                                        embyViewModel.selectMediaSource(media.id, sourceId)
+                                    },
                                 )
                             }
                         }

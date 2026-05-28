@@ -25,6 +25,7 @@ import com.qiuhu.embyflow.data.settings.libraryFilterFor
 import com.qiuhu.embyflow.data.settings.isActive
 import com.qiuhu.embyflow.data.settings.normalizeLibrarySortMode
 import com.qiuhu.embyflow.model.EmbyHomePayload
+import com.qiuhu.embyflow.model.MediaEdition
 import com.qiuhu.embyflow.model.MediaItem
 import com.qiuhu.embyflow.model.MediaPerson
 import com.qiuhu.embyflow.model.MediaTag
@@ -190,6 +191,11 @@ class EmbyViewModel(
     val sleepTimerEndMs: StateFlow<Long?> = _sleepTimerEndMs.asStateFlow()
     private var sleepTimerJob: Job? = null
 
+    private val _mediaEditions = MutableStateFlow<Map<String, List<MediaEdition>>>(emptyMap())
+    val mediaEditions: StateFlow<Map<String, List<MediaEdition>>> = _mediaEditions.asStateFlow()
+    private val _selectedMediaSourceId = MutableStateFlow<Map<String, String?>>(emptyMap())
+    val selectedMediaSourceId: StateFlow<Map<String, String?>> = _selectedMediaSourceId.asStateFlow()
+
     init {
         observeSettings()
         observeContinueWatching()
@@ -201,6 +207,13 @@ class EmbyViewModel(
 
     fun refresh() {
         bootstrap()
+    }
+
+    fun selectMediaSource(itemId: String, sourceId: String?) {
+        _selectedMediaSourceId.value = _selectedMediaSourceId.value.toMutableMap().apply {
+            put(itemId, sourceId)
+        }
+        playbackSourceCache.remove(itemId)
     }
 
     fun openPlayer(media: MediaItem) {
@@ -247,6 +260,7 @@ class EmbyViewModel(
                     media = resolvedPlayableMedia,
                     fallbackTitle = resolvedPlayableMedia.title.ifBlank { resolvedMedia.title },
                     trigger = "open-player",
+                    mediaSourceId = _selectedMediaSourceId.value[resolvedPlayableMedia.id],
                 )
                 Triple(resolvedPlayableMedia, source, initialPositionMs)
             }.onSuccess { (playableMedia, source, initialPositionMs) ->
@@ -820,12 +834,29 @@ class EmbyViewModel(
             loadSeriesDetail(cachedMedia)
         }
 
+        val activeSession = session ?: return
+        val repository = repository ?: return
+
+        if (!cachedMedia.isSeries && !_mediaEditions.value.containsKey(cachedMedia.id)) {
+            viewModelScope.launch {
+                runCatching {
+                    repository.loadMediaEditions(
+                        userId = activeSession.userId,
+                        token = activeSession.accessToken,
+                        itemId = cachedMedia.id,
+                    )
+                }.onSuccess { editions ->
+                    if (editions.isNotEmpty()) {
+                        _mediaEditions.update { current -> current + (cachedMedia.id to editions) }
+                    }
+                }
+            }
+        }
+
         if (cachedMedia.actors.isNotEmpty()) {
             return
         }
 
-        val activeSession = session ?: return
-        val repository = repository ?: return
         if (!detailLoadingIds.add(media.id)) {
             return
         }
@@ -1742,6 +1773,7 @@ class EmbyViewModel(
         media: MediaItem,
         fallbackTitle: String,
         trigger: String,
+        mediaSourceId: String? = null,
     ): EmbyPlaybackSource {
         playbackSourceCache[media.id]?.let { cached ->
             return cached
@@ -1752,6 +1784,7 @@ class EmbyViewModel(
             media = media,
             fallbackTitle = fallbackTitle,
             trigger = trigger,
+            mediaSourceId = mediaSourceId,
         ).await().getOrThrow()
     }
 
@@ -1761,6 +1794,7 @@ class EmbyViewModel(
         media: MediaItem,
         fallbackTitle: String,
         trigger: String,
+        mediaSourceId: String? = null,
     ): Deferred<Result<EmbyPlaybackSource>> {
         playbackSourceCache[media.id]?.let { cached ->
             return CompletableDeferred(Result.success(cached))
@@ -1787,6 +1821,7 @@ class EmbyViewModel(
                     token = activeSession.accessToken,
                     itemId = media.id,
                     fallbackTitle = fallbackTitle,
+                    mediaSourceId = mediaSourceId,
                 )
             }.also { result ->
                 val elapsedMs = SystemClock.elapsedRealtime() - startMs

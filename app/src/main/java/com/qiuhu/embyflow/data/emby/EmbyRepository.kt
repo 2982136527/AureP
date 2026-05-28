@@ -8,6 +8,7 @@ import com.qiuhu.embyflow.data.settings.librarySortSpec
 import com.qiuhu.embyflow.model.ChapterInfo
 import com.qiuhu.embyflow.model.EmbyHomePayload
 import com.qiuhu.embyflow.model.TrickplayInfo
+import com.qiuhu.embyflow.model.MediaEdition
 import com.qiuhu.embyflow.model.MediaItem
 import com.qiuhu.embyflow.model.MediaPerson
 import com.qiuhu.embyflow.model.MediaTag
@@ -724,6 +725,7 @@ class EmbyRepository(
         token: String,
         itemId: String,
         fallbackTitle: String,
+        mediaSourceId: String? = null,
     ): EmbyPlaybackSource = withContext(Dispatchers.IO) {
         val playbackInfo = post<PlaybackInfoDto>(
             path = "/Items/$itemId/PlaybackInfo?UserId=${userId.urlEncode()}",
@@ -734,8 +736,12 @@ class EmbyRepository(
             ),
             requestClient = playbackInfoClient,
         )
-        val source = playbackInfo.MediaSources.firstOrNull()
-            ?: throw IllegalStateException("服务端没有返回可播放媒体源")
+        val source = if (mediaSourceId != null) {
+            playbackInfo.MediaSources.firstOrNull { it.Id == mediaSourceId }
+                ?: playbackInfo.MediaSources.firstOrNull()
+        } else {
+            playbackInfo.MediaSources.firstOrNull()
+        } ?: throw IllegalStateException("服务端没有返回可播放媒体源")
         val playSessionId = playbackInfo.PlaySessionId?.takeIf { it.isNotBlank() }
         val audioTracks = source.buildAudioTracks()
         val subtitleTracks = source.buildSubtitleTracks(
@@ -824,6 +830,42 @@ class EmbyRepository(
             streamOptions = streamOptions,
             selectedStreamOptionId = selectedStreamOption.id,
         )
+    }
+
+    suspend fun loadMediaEditions(
+        userId: String,
+        token: String,
+        itemId: String,
+    ): List<MediaEdition> = withContext(Dispatchers.IO) {
+        val playbackInfo = post<PlaybackInfoDto>(
+            path = "/Items/$itemId/PlaybackInfo?UserId=${userId.urlEncode()}",
+            token = token,
+            body = buildPlaybackInfoRequestBody(
+                userId = userId,
+                itemId = itemId,
+            ),
+            requestClient = playbackInfoClient,
+        )
+        if (playbackInfo.MediaSources.size <= 1) {
+            return@withContext emptyList()
+        }
+        playbackInfo.MediaSources.map { source ->
+            val videoStream = source.MediaStreams.firstOrNull { it.Type.equals("Video", ignoreCase = true) }
+            val audioStream = source.MediaStreams.firstOrNull { it.Type.equals("Audio", ignoreCase = true) }
+            MediaEdition(
+                id = source.Id,
+                name = source.Name ?: "默认",
+                videoCodec = videoStream?.Codec?.uppercase(Locale.US),
+                audioCodec = audioStream?.Codec?.uppercase(Locale.US),
+                resolution = videoStream?.resolutionLabel(),
+                videoRange = formatVideoDynamicRangeLabel(
+                    videoRange = videoStream?.VideoRange,
+                    extendedVideoType = videoStream?.ExtendedVideoType,
+                ).takeIf { it != "SDR" },
+                bitDepth = videoStream?.BitDepth,
+                container = source.Container?.uppercase(Locale.US),
+            )
+        }
     }
 
     private fun buildPlaybackInfoRequestBody(
