@@ -14,6 +14,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
@@ -81,6 +84,9 @@ import com.qiuhu.embyflow.ui.components.SoftUiSurfacePressed
 import com.qiuhu.embyflow.ui.components.SoftUiSurfaceStyle
 import com.qiuhu.embyflow.ui.components.softUiSurface
 import com.qiuhu.embyflow.ui.theme.AppTitleFontFamily
+import com.qiuhu.embyflow.ui.theme.LocalAnimatedVisibilityScope
+import com.qiuhu.embyflow.ui.theme.LocalSharedTransitionScope
+import androidx.compose.animation.ExperimentalSharedTransitionApi
 import kotlin.math.abs
 
 @Composable
@@ -258,13 +264,6 @@ fun DetailScreen(
             }
 
             item {
-                DetailPlayButton(
-                    label = playButtonLabel,
-                    onPlay = { onPlay(playTarget) },
-                )
-            }
-
-            item {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (media.isSeries) {
                         DetailSeriesHeaderSection(
@@ -374,6 +373,29 @@ fun DetailScreen(
                     }
                 }
             }
+        }
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Transparent,
+                            EditorialBackground.copy(alpha = 0.95f),
+                            EditorialBackground,
+                        ),
+                    ),
+                )
+                .padding(horizontal = 16.dp)
+                .navigationBarsPadding()
+                .padding(top = 16.dp, bottom = 12.dp),
+        ) {
+            DetailPlayButton(
+                label = playButtonLabel,
+                onPlay = { onPlay(playTarget) },
+            )
         }
 
         val summary = media.summary.takeIf { it.isNotBlank() && it != "暂无简介" }
@@ -597,6 +619,7 @@ private fun DetailTagChip(
     }
 }
 
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun DetailHeroCard(
     media: MediaItem,
@@ -658,15 +681,26 @@ private fun DetailHeroCard(
                     color = EditorialSurface,
                 ),
         ) {
+            val sharedScope = LocalSharedTransitionScope.current
+            val animScope = LocalAnimatedVisibilityScope.current
+            val baseModifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = imageScale
+                    scaleY = imageScale
+                }
+            val imageModifier = if (sharedScope != null && animScope != null) {
+                with(sharedScope) {
+                    baseModifier.sharedElement(
+                        rememberSharedContentState(key = "poster-${media.id}"),
+                        animatedVisibilityScope = animScope,
+                    )
+                }
+            } else baseModifier
             PixelCatAsyncImage(
                 model = imageUrl,
                 contentDescription = media.title,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        scaleX = imageScale
-                        scaleY = imageScale
-                    },
+                modifier = imageModifier,
                 contentScale = ContentScale.Crop,
                 onSuccess = { state ->
                     val width = state.result.drawable.intrinsicWidth

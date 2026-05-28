@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -69,9 +70,11 @@ import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PlayCircle
+import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material.icons.rounded.Replay10
 import androidx.compose.material.icons.rounded.Subtitles
+import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -96,6 +99,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalViewConfiguration
@@ -146,6 +151,7 @@ import com.qiuhu.embyflow.data.settings.PLAYER_MODE_COMPATIBILITY
 import com.qiuhu.embyflow.data.settings.PLAYER_MODE_STANDARD
 import com.qiuhu.embyflow.data.settings.PLAYER_MODE_SYSTEM
 import com.qiuhu.embyflow.model.MediaItem
+import com.qiuhu.embyflow.model.seasonEpisodeLabel
 import com.qiuhu.embyflow.model.isEpisode
 import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_CHINESE
 import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_ENGLISH
@@ -155,6 +161,7 @@ import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_KOREAN
 import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_SIMPLIFIED_CHINESE
 import com.qiuhu.embyflow.data.settings.SUBTITLE_LANGUAGE_PREFERENCE_TRADITIONAL_CHINESE
 import com.qiuhu.embyflow.ui.theme.AppTitleFontFamily
+import com.qiuhu.embyflow.ui.components.PixelCatAsyncImage
 import com.qiuhu.embyflow.ui.components.SoftUiSurfaceStyle
 import com.qiuhu.embyflow.ui.components.softUiInsetSurface
 import com.qiuhu.embyflow.ui.components.softUiRaisedSurface
@@ -301,6 +308,11 @@ fun PlayerScreen(
     source: EmbyPlaybackSource,
     initialResumePositionMs: Long,
     settings: AppSettings,
+    sleepTimerEndMs: Long? = null,
+    onSetSleepTimer: (Long) -> Unit = {},
+    onCancelSleepTimer: () -> Unit = {},
+    playQueueItems: List<MediaItem> = emptyList(),
+    onPlayEpisode: (MediaItem) -> Unit = {},
     onPlaybackStarted: (EmbyPlaybackSessionState) -> Unit,
     onPlaybackProgress: (EmbyPlaybackSessionState, String) -> Unit,
     onPlaybackStopped: (EmbyPlaybackSessionState) -> Unit,
@@ -420,6 +432,12 @@ fun PlayerScreen(
     var showAudioSheet by rememberSaveable {
         mutableStateOf(false)
     }
+    var showSleepTimerSheet by rememberSaveable {
+        mutableStateOf(false)
+    }
+    var showQueueSheet by rememberSaveable {
+        mutableStateOf(false)
+    }
     var resumePositionMs by rememberSaveable(mediaId) {
         mutableLongStateOf(initialResumePositionMs.coerceAtLeast(0L))
     }
@@ -461,6 +479,9 @@ fun PlayerScreen(
     }
     var gestureActive by remember {
         mutableStateOf(false)
+    }
+    var doubleTapFeedback by remember {
+        mutableStateOf<DoubleTapFeedback?>(null)
     }
     var failedStreamOptionIds by remember(mediaId) {
         mutableStateOf(emptySet<String>())
@@ -1396,6 +1417,8 @@ fun PlayerScreen(
             showSubtitleSheet = false
             showAudioSheet = false
         }
+        showSleepTimerSheet = false
+        showQueueSheet = false
         revealControls()
     }
 
@@ -1406,11 +1429,13 @@ fun PlayerScreen(
                 revealControls()
             }
 
-            showTrackSheet || showRuntimeSheet || showSubtitleSheet || showAudioSheet -> {
+            showTrackSheet || showRuntimeSheet || showSubtitleSheet || showAudioSheet || showSleepTimerSheet || showQueueSheet -> {
                 showTrackSheet = false
                 showRuntimeSheet = false
                 showSubtitleSheet = false
                 showAudioSheet = false
+                showSleepTimerSheet = false
+                showQueueSheet = false
                 revealControls()
             }
 
@@ -2141,7 +2166,7 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(controlsVisible, controlsLocked, isPlaying, showTrackSheet, showRuntimeSheet, showSubtitleSheet, showAudioSheet) {
+    LaunchedEffect(controlsVisible, controlsLocked, isPlaying, showTrackSheet, showRuntimeSheet, showSubtitleSheet, showAudioSheet, showSleepTimerSheet, showQueueSheet) {
         if (
             controlsVisible &&
             !controlsLocked &&
@@ -2149,7 +2174,9 @@ fun PlayerScreen(
             !showTrackSheet &&
             !showRuntimeSheet &&
             !showSubtitleSheet &&
-            !showAudioSheet
+            !showAudioSheet &&
+            !showSleepTimerSheet &&
+            !showQueueSheet
         ) {
             delay(3200)
             controlsVisible = false
@@ -2162,6 +2189,13 @@ fun PlayerScreen(
             if (!gestureActive) {
                 gestureOverlayState = null
             }
+        }
+    }
+
+    LaunchedEffect(doubleTapFeedback) {
+        if (doubleTapFeedback != null) {
+            delay(650)
+            doubleTapFeedback = null
         }
     }
 
@@ -2265,6 +2299,8 @@ fun PlayerScreen(
             )
         }
 
+        val hapticFeedback = LocalHapticFeedback.current
+
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -2272,19 +2308,36 @@ fun PlayerScreen(
                     playerSurfaceWidthPx = size.width.toFloat().coerceAtLeast(1f)
                     playerSurfaceHeightPx = size.height.toFloat().coerceAtLeast(1f)
                 }
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                ) {
-                    if (!controlsLocked) {
-                        controlsVisible = !controlsVisible
-                        if (!controlsVisible) {
-                            showTrackSheet = false
-                            showRuntimeSheet = false
-                            showSubtitleSheet = false
-                            showAudioSheet = false
-                        }
-                    }
+                .pointerInput(controlsLocked) {
+                    detectTapGestures(
+                        onTap = {
+                            if (!controlsLocked) {
+                                controlsVisible = !controlsVisible
+                                if (!controlsVisible) {
+                                    showTrackSheet = false
+                                    showRuntimeSheet = false
+                                    showSubtitleSheet = false
+                                    showAudioSheet = false
+                                    showSleepTimerSheet = false
+                                    showQueueSheet = false
+                                }
+                            }
+                        },
+                        onDoubleTap = { offset ->
+                            if (controlsLocked) return@detectTapGestures
+                            val isLeft = offset.x < playerSurfaceWidthPx / 2f
+                            if (isLeft) {
+                                seekBackPlayback()
+                            } else {
+                                seekForwardPlayback()
+                            }
+                            reportPlaybackProgressEvent("TimeUpdate")
+                            doubleTapFeedback = DoubleTapFeedback(
+                                isForward = !isLeft,
+                            )
+                            hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        },
+                    )
                 }
                 .pointerInput(
                     controlsLocked,
@@ -2315,6 +2368,7 @@ fun PlayerScreen(
                             seekBasePosition = currentPositionSnapshot()
                             gestureActive = true
                             gestureOverlayState = null
+                            hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
                         },
                         onDrag = { _, dragAmount ->
                             horizontalDrag += dragAmount.x
@@ -2409,6 +2463,15 @@ fun PlayerScreen(
             }
         }
 
+        doubleTapFeedback?.let { feedback ->
+            PlayerDoubleTapIndicator(
+                isForward = feedback.isForward,
+                modifier = Modifier
+                    .align(if (feedback.isForward) Alignment.CenterEnd else Alignment.CenterStart)
+                    .padding(horizontal = 48.dp),
+            )
+        }
+
         AnimatedVisibility(
             visible = isBuffering && gestureOverlayState == null,
             enter = fadeIn(),
@@ -2437,6 +2500,7 @@ fun PlayerScreen(
                     onClick = {
                         controlsLocked = false
                         revealControls()
+                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
                     },
                 )
             }
@@ -2461,11 +2525,20 @@ fun PlayerScreen(
                         title = headerTitle,
                         titleLogoUrl = headerLogoUrl,
                         compact = isLandscapeFullscreen || isLandscapeLayout,
+                        showQueueButton = playQueueItems.isNotEmpty(),
                         onClose = {
                             onClose(
                                 currentPositionSnapshot(),
                                 durationSnapshot(),
                             )
+                        },
+                        onOpenQueue = {
+                            showQueueSheet = !showQueueSheet
+                            showTrackSheet = false
+                            showRuntimeSheet = false
+                            showSubtitleSheet = false
+                            showAudioSheet = false
+                            showSleepTimerSheet = false
                         },
                     )
 
@@ -2477,6 +2550,7 @@ fun PlayerScreen(
                         audioChoiceLabel = audioChoiceLabel,
                         playbackSpeed = playbackSpeed,
                         isLandscapeFullscreen = isLandscapeFullscreen,
+                        sleepTimerActive = sleepTimerEndMs != null,
                         onToggleLock = {
                             controlsLocked = true
                             controlsVisible = false
@@ -2484,18 +2558,22 @@ fun PlayerScreen(
                             showRuntimeSheet = false
                             showSubtitleSheet = false
                             showAudioSheet = false
+                            showSleepTimerSheet = false
+                            hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
                         },
                         onToggleSubtitleSheet = {
                             showTrackSheet = false
                             showRuntimeSheet = false
                             showSubtitleSheet = !showSubtitleSheet
                             showAudioSheet = false
+                            showSleepTimerSheet = false
                         },
                         onToggleAudioSheet = {
                             showTrackSheet = false
                             showRuntimeSheet = false
                             showAudioSheet = !showAudioSheet
                             showSubtitleSheet = false
+                            showSleepTimerSheet = false
                         },
                         onToggleFullscreen = {
                             isLandscapeFullscreen = !isLandscapeFullscreen
@@ -2514,10 +2592,17 @@ fun PlayerScreen(
                             reportPlaybackProgressEvent("PlaybackRateChange")
                             revealControls()
                         },
+                        onToggleSleepTimerSheet = {
+                            showTrackSheet = false
+                            showRuntimeSheet = false
+                            showSubtitleSheet = false
+                            showAudioSheet = false
+                            showSleepTimerSheet = !showSleepTimerSheet
+                        },
                     )
 
                     AnimatedVisibility(
-                        visible = showTrackSheet || showRuntimeSheet || showSubtitleSheet || showAudioSheet,
+                        visible = showTrackSheet || showRuntimeSheet || showSubtitleSheet || showAudioSheet || showSleepTimerSheet,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .playerBottomOverlayInsets(isLandscapeFullscreen)
@@ -2592,7 +2677,46 @@ fun PlayerScreen(
                                 entryPlaybackUrl = activeStreamOption.streamUrl,
                                 currentPlaybackUrl = resolvedPlaybackUrl,
                             )
+
+                            showSleepTimerSheet -> PlayerSleepTimerSheet(
+                                isActive = sleepTimerEndMs != null,
+                                onSelectDuration = { durationMs ->
+                                    onSetSleepTimer(durationMs)
+                                    showSleepTimerSheet = false
+                                    revealControls()
+                                },
+                                onCancel = {
+                                    onCancelSleepTimer()
+                                    showSleepTimerSheet = false
+                                    revealControls()
+                                },
+                            )
                         }
+                    }
+
+                    AnimatedVisibility(
+                        visible = showQueueSheet && playQueueItems.isNotEmpty(),
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .playerBottomOverlayInsets(isLandscapeFullscreen)
+                            .padding(
+                                start = 24.dp,
+                                top = 24.dp,
+                                end = 24.dp + landscapeNavBarRightPadding,
+                                bottom = if (isLandscapeLayout) 96.dp else 188.dp,
+                            ),
+                        enter = fadeIn() + slideInVertically(initialOffsetY = { it / 4 }),
+                        exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 4 }),
+                    ) {
+                        PlayerQueueSheet(
+                            items = playQueueItems,
+                            currentMediaId = mediaId,
+                            onSelectItem = { item ->
+                                showQueueSheet = false
+                                revealControls()
+                                onPlayEpisode(item)
+                            },
+                        )
                     }
 
                     if (
@@ -2600,7 +2724,9 @@ fun PlayerScreen(
                         !showTrackSheet &&
                         !showRuntimeSheet &&
                         !showSubtitleSheet &&
-                        !showAudioSheet
+                        !showAudioSheet &&
+                        !showSleepTimerSheet &&
+                        !showQueueSheet
                     ) {
                         PlayerEpisodeTitleOverlay(
                             modifier = Modifier
@@ -2631,6 +2757,9 @@ fun PlayerScreen(
                         bufferedPositionMs = bufferedPositionMs,
                         isPlaying = isPlaying,
                         isLandscapeCompact = isLandscapeFullscreen || isLandscapeLayout,
+                        chapters = media.chapters,
+                        trickplay = media.trickplay.values.firstOrNull(),
+                        isScrubbing = isScrubbing,
                         onScrubStart = {
                             isScrubbing = true
                             sliderPositionMs = currentPositionMs.toFloat()
@@ -2662,6 +2791,7 @@ fun PlayerScreen(
                             togglePlayPausePlayback()
                             reportPlaybackProgressEvent(pauseEvent)
                             revealControls()
+                            hapticFeedback.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         },
                         onSeekForward = {
                             seekForwardPlayback()
@@ -2790,6 +2920,10 @@ private data class PlayerGestureOverlayState(
     val progress: Float? = null,
 )
 
+private data class DoubleTapFeedback(
+    val isForward: Boolean,
+)
+
 private const val SUBTITLE_OFF = "__off__"
 
 private fun Modifier.playerBottomOverlayInsets(
@@ -2861,7 +2995,9 @@ private fun PlayerTopBar(
     title: String,
     titleLogoUrl: String?,
     compact: Boolean,
+    showQueueButton: Boolean = false,
     onClose: () -> Unit,
+    onOpenQueue: () -> Unit = {},
 ) {
     val reservedEndSpace = if (compact) 96.dp else 124.dp
     Row(
@@ -2896,6 +3032,23 @@ private fun PlayerTopBar(
         } else {
             Spacer(modifier = Modifier.weight(1f))
         }
+
+        if (showQueueButton) {
+            Box(
+                modifier = Modifier
+                    .softUiRaisedSurface(
+                        shape = RoundedCornerShape(22.dp),
+                        color = PlayerPanelColor,
+                    )
+                    .padding(horizontal = 6.dp, vertical = 6.dp),
+            ) {
+                PlayerOverlayIconButton(
+                    icon = Icons.AutoMirrored.Rounded.QueueMusic,
+                    contentDescription = "播放队列",
+                    onClick = onOpenQueue,
+                )
+            }
+        }
     }
 }
 
@@ -2906,12 +3059,14 @@ private fun PlayerSidePills(
     audioChoiceLabel: String,
     playbackSpeed: Float,
     isLandscapeFullscreen: Boolean,
+    sleepTimerActive: Boolean = false,
     onToggleLock: () -> Unit,
     onToggleSubtitleSheet: () -> Unit,
     onToggleAudioSheet: () -> Unit,
     onToggleFullscreen: () -> Unit,
     onDecreaseSpeed: () -> Unit,
     onIncreaseSpeed: () -> Unit,
+    onToggleSleepTimerSheet: () -> Unit,
 ) {
     Box(modifier = modifier) {
         Column(
@@ -2945,6 +3100,12 @@ private fun PlayerSidePills(
                 icon = Icons.Rounded.AspectRatio,
                 contentDescription = if (isLandscapeFullscreen) "退出横屏全屏" else "进入横屏全屏",
                 onClick = onToggleFullscreen,
+            )
+            PlayerOverlayIconButton(
+                icon = Icons.Rounded.Timer,
+                contentDescription = if (sleepTimerActive) "睡眠定时已启用" else "睡眠定时",
+                onClick = onToggleSleepTimerSheet,
+                tint = if (sleepTimerActive) MaterialTheme.colorScheme.primary else SoftUiTextPrimary,
             )
         }
 
@@ -2988,6 +3149,9 @@ private fun PlayerBottomControls(
     bufferedPositionMs: Long,
     isPlaying: Boolean,
     isLandscapeCompact: Boolean,
+    chapters: List<com.qiuhu.embyflow.model.ChapterInfo> = emptyList(),
+    trickplay: com.qiuhu.embyflow.model.TrickplayInfo? = null,
+    isScrubbing: Boolean = false,
     onScrubStart: () -> Unit,
     onScrub: (Float) -> Unit,
     onScrubStop: () -> Unit,
@@ -3016,10 +3180,20 @@ private fun PlayerBottomControls(
             ),
         verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 5.dp),
     ) {
+        if (isScrubbing && trickplay != null) {
+            PlayerTrickplayPreview(
+                trickplay = trickplay,
+                positionMs = currentPositionMs,
+                durationMs = safeDuration,
+                modifier = Modifier.align(Alignment.CenterHorizontally),
+            )
+        }
+
         PlayerProgressBar(
             progressValue = progressValue,
             bufferedFraction = bufferedFraction,
             durationMs = safeDuration,
+            chapters = chapters,
             onScrubStart = onScrubStart,
             onScrub = onScrub,
             onScrubStop = onScrubStop,
@@ -3090,10 +3264,48 @@ private fun PlayerBottomControls(
 }
 
 @Composable
+private fun PlayerTrickplayPreview(
+    trickplay: com.qiuhu.embyflow.model.TrickplayInfo,
+    positionMs: Long,
+    durationMs: Long,
+    modifier: Modifier = Modifier,
+) {
+    if (durationMs <= 0L || trickplay.thumbnailCount <= 0 || trickplay.interval <= 0) return
+
+    val index = ((positionMs / trickplay.interval).toInt()).coerceIn(0, trickplay.thumbnailCount - 1)
+    val tileUrl = trickplay.tileUrl(index)
+    val (offsetX, offsetY) = trickplay.thumbnailOffset(index)
+    val density = LocalDensity.current
+    val thumbWidthDp = with(density) { trickplay.tileWidth.toDp() }
+    val thumbHeightDp = with(density) { trickplay.tileHeight.toDp() }
+    val tileWidthDp = with(density) { trickplay.width.toDp() }
+    val tileHeightDp = with(density) { trickplay.height.toDp() }
+    val offsetXDp = with(density) { offsetX.toDp() }
+    val offsetYDp = with(density) { offsetY.toDp() }
+
+    Box(
+        modifier = modifier
+            .size(width = thumbWidthDp, height = thumbHeightDp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color.Black),
+    ) {
+        AsyncImage(
+            model = tileUrl,
+            contentDescription = null,
+            modifier = Modifier
+                .size(width = tileWidthDp, height = tileHeightDp)
+                .offset(x = -offsetXDp, y = -offsetYDp),
+            contentScale = ContentScale.None,
+        )
+    }
+}
+
+@Composable
 private fun PlayerProgressBar(
     progressValue: Float,
     bufferedFraction: Float,
     durationMs: Long,
+    chapters: List<com.qiuhu.embyflow.model.ChapterInfo> = emptyList(),
     onScrubStart: () -> Unit,
     onScrub: (Float) -> Unit,
     onScrubStop: () -> Unit,
@@ -3172,6 +3384,21 @@ private fun PlayerProgressBar(
                     .fillMaxWidth(progressFraction)
                     .height(10.dp)
                     .background(PlayerAccentColor),
+            )
+        }
+
+        for (chapter in chapters) {
+            if (durationMs <= 0L) break
+            val fraction = (chapter.startPositionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+            if (fraction <= 0f || fraction >= 1f) continue
+            val markerOffset = with(density) { (trackWidthPx * fraction).toDp() - 0.5.dp }
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = markerOffset)
+                    .width(1.dp)
+                    .height(trackHeight)
+                    .background(Color.White.copy(alpha = 0.4f)),
             )
         }
 
@@ -3377,6 +3604,171 @@ private fun PlayerSubtitleSheet(
             SubtitleOptionRow(
                 option = option,
                 onClick = { onSelectSubtitle(option.targetKey) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun PlayerSleepTimerSheet(
+    isActive: Boolean,
+    onSelectDuration: (Long) -> Unit,
+    onCancel: () -> Unit,
+) {
+    val durations = listOf(
+        15L to "15 分钟",
+        30L to "30 分钟",
+        45L to "45 分钟",
+        60L to "60 分钟",
+        90L to "90 分钟",
+    )
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .widthIn(max = 320.dp)
+            .softUiRaisedSurface(
+                shape = RoundedCornerShape(26.dp),
+                color = PlayerPanelColor,
+            )
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        durations.forEach { (minutes, label) ->
+            SubtitleOptionRow(
+                option = SubtitleOption(
+                    title = label,
+                    subtitle = null,
+                    targetKey = minutes.toString(),
+                    selected = false,
+                ),
+                onClick = { onSelectDuration(minutes * 60_000L) },
+            )
+        }
+
+        if (isActive) {
+            SubtitleOptionRow(
+                option = SubtitleOption(
+                    title = "取消定时",
+                    subtitle = null,
+                    targetKey = "cancel",
+                    selected = false,
+                ),
+                onClick = onCancel,
+            )
+        }
+    }
+}
+
+@Composable
+private fun PlayerQueueSheet(
+    items: List<MediaItem>,
+    currentMediaId: String,
+    onSelectItem: (MediaItem) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .widthIn(max = 400.dp)
+            .heightIn(max = 400.dp)
+            .softUiRaisedSurface(
+                shape = RoundedCornerShape(26.dp),
+                color = PlayerPanelColor,
+            )
+            .padding(vertical = 10.dp),
+    ) {
+        Text(
+            text = "播放队列",
+            style = MaterialTheme.typography.titleSmall,
+            color = SoftUiTextPrimary,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+        )
+
+        androidx.compose.foundation.lazy.LazyColumn(
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            items.forEach { item ->
+                item(key = item.id) {
+                    val isCurrent = item.id == currentMediaId
+                    PlayerQueueItemRow(
+                        item = item,
+                        isCurrent = isCurrent,
+                        onClick = { onSelectItem(item) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlayerQueueItemRow(
+    item: MediaItem,
+    isCurrent: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = !isCurrent, onClick = onClick)
+            .background(
+                if (isCurrent) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                else androidx.compose.ui.graphics.Color.Transparent,
+            )
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(width = 64.dp, height = 36.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(EditorialSurfaceStrong),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (item.primaryImageUrl != null) {
+                com.qiuhu.embyflow.ui.components.PixelCatAsyncImage(
+                    model = item.primaryImageUrl,
+                    contentDescription = item.title,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Text(
+                    text = item.episodeNumber?.toString() ?: "",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = SoftUiTextSecondary,
+                )
+            }
+        }
+
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = item.title,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (isCurrent) MaterialTheme.colorScheme.primary else SoftUiTextPrimary,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+            val subtitle = item.seasonEpisodeLabel()
+            if (subtitle.isNotBlank()) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = SoftUiTextSecondary,
+                    maxLines = 1,
+                )
+            }
+        }
+
+        if (isCurrent) {
+            Text(
+                text = "播放中",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
             )
         }
     }
@@ -3620,6 +4012,37 @@ private fun PlayerGestureOverlay(
 }
 
 @Composable
+private fun PlayerDoubleTapIndicator(
+    isForward: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(56.dp)
+                .background(Color(0x55000000), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = if (isForward) Icons.Rounded.Forward10 else Icons.Rounded.Replay10,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(28.dp),
+            )
+        }
+        Text(
+            text = if (isForward) "快进 10 秒" else "快退 10 秒",
+            style = MaterialTheme.typography.labelMedium,
+            color = Color.White,
+        )
+    }
+}
+
+@Composable
 private fun PlayerLoadingOverlay(
     detail: String?,
 ) {
@@ -3808,6 +4231,7 @@ private fun PlayerOverlayIconButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     contentDescription: String,
     onClick: () -> Unit,
+    tint: androidx.compose.ui.graphics.Color = SoftUiTextPrimary,
 ) {
     Box(
         modifier = Modifier
@@ -3822,7 +4246,7 @@ private fun PlayerOverlayIconButton(
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            tint = SoftUiTextPrimary,
+            tint = tint,
         )
     }
 }

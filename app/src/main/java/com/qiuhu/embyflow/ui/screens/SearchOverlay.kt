@@ -64,6 +64,7 @@ fun SearchOverlay(
     onSelectRecentQuery: (String) -> Unit,
     onCommitSearch: (String) -> Unit,
     onClearRecentSearches: () -> Unit,
+    onViewAllResults: (String) -> Unit = {},
 ) {
     val focusManager = LocalFocusManager.current
 
@@ -204,6 +205,7 @@ fun SearchOverlay(
                         query = state.query,
                         resultCount = state.results.size,
                         isLoading = state.isLoading,
+                        onViewAll = { onViewAllResults(state.query.trim()) },
                     )
                 }
 
@@ -263,6 +265,7 @@ private fun SearchResultHeader(
     query: String,
     resultCount: Int,
     isLoading: Boolean,
+    onViewAll: () -> Unit = {},
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -275,10 +278,27 @@ private fun SearchResultHeader(
             color = EditorialTextPrimary,
             fontWeight = FontWeight.Bold,
         )
-        EditorialPill(
-            text = if (isLoading) query else "${resultCount} 条结果",
-            color = EditorialChip,
-        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (!isLoading && resultCount > 0) {
+                EditorialCard(
+                    shape = RoundedCornerShape(999.dp),
+                    color = EditorialSurfaceStrong,
+                    onClick = onViewAll,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                ) {
+                    Text(
+                        text = "查看全部",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = EditorialTextPrimary,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+            EditorialPill(
+                text = if (isLoading) query else "${resultCount} 条结果",
+                color = EditorialChip,
+            )
+        }
     }
 }
 

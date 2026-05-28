@@ -29,6 +29,23 @@ data class QueryResultDto(
 )
 
 @Serializable
+data class ChapterDto(
+    val Name: String = "",
+    val StartPositionTicks: Long = 0,
+)
+
+@Serializable
+data class TrickplayInfoDto(
+    val Width: Int = 0,
+    val Height: Int = 0,
+    val TileWidth: Int = 0,
+    val TileHeight: Int = 0,
+    val ThumbnailCount: Int = 0,
+    val Interval: Long = 0,
+    val Bandwidth: Long = 0,
+)
+
+@Serializable
 data class BaseItemDto(
     val Id: String,
     val Name: String,
@@ -56,6 +73,8 @@ data class BaseItemDto(
     val ChildCount: Int? = null,
     val RecursiveItemCount: Int? = null,
     val IsFolder: Boolean = false,
+    val Chapters: List<ChapterDto> = emptyList(),
+    val Trickplay: Map<String, TrickplayInfoDto> = emptyMap(),
 )
 
 @Serializable

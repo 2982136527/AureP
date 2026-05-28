@@ -28,8 +28,8 @@ android {
         applicationId = "com.qiuhu.embyflow"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.0.10"
+        versionCode = 11
+        versionName = "0.0.11"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -116,6 +116,7 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.4.1")
     implementation("org.videolan.android:libvlc-all:3.7.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("androidx.palette:palette-ktx:1.0.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 

@@ -4,7 +4,6 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -17,7 +16,6 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
@@ -28,10 +26,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import com.qiuhu.embyflow.ui.theme.LocalDynamicAccent
 
-private val NavSurface = SoftUiSurface
 private val NavSelected = SoftUiSurfacePressed
-private val NavIcon = SoftUiTextPrimary
 private val NavIconMuted = SoftUiTextSecondary
 val FloatingNavBarHeight = 58.dp
 val FloatingNavBarOuterPadding = 12.dp
@@ -53,6 +50,7 @@ fun <T> FloatingNavigationBar(
     onSearchClick: () -> Unit,
 ) {
     val searchInteractionSource = remember { MutableInteractionSource() }
+    val accentColor = LocalDynamicAccent.current.primary
 
     Row(
         modifier = modifier
@@ -62,14 +60,12 @@ fun <T> FloatingNavigationBar(
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
+        GlassPanel(
             modifier = Modifier
                 .weight(1f)
-                .height(FloatingNavBarHeight)
-                .softUiRaisedSurface(
-                    shape = RoundedCornerShape(29.dp),
-                    color = NavSurface,
-                ),
+                .height(FloatingNavBarHeight),
+            shape = RoundedCornerShape(29.dp),
+            emphasis = GlassEmphasis.Regular,
         ) {
             Row(
                 modifier = Modifier
@@ -86,6 +82,7 @@ fun <T> FloatingNavigationBar(
                         selected = item.value == selectedTab,
                         icon = item.icon,
                         label = item.label,
+                        accentColor = accentColor,
                         onClick = { onTabSelected(item.value) },
                     )
                 }
@@ -94,26 +91,21 @@ fun <T> FloatingNavigationBar(
 
         Spacer(modifier = Modifier.width(12.dp))
 
-        Box(
-            modifier = Modifier
-                .size(FloatingNavBarHeight)
-                .pressScale(searchInteractionSource)
-                .softUiRaisedSurface(
-                    shape = CircleShape,
-                    color = NavSurface,
-                )
-                .clickable(
-                    interactionSource = searchInteractionSource,
-                    indication = null,
-                    onClick = onSearchClick,
-                ),
-            contentAlignment = Alignment.Center,
+        GlassCircleButton(
+            modifier = Modifier.size(FloatingNavBarHeight),
+            onClick = onSearchClick,
+            emphasis = GlassEmphasis.Strong,
         ) {
-            Icon(
-                imageVector = searchIcon,
-                contentDescription = "Search",
-                tint = NavIcon,
-            )
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = searchIcon,
+                    contentDescription = "Search",
+                    tint = accentColor,
+                )
+            }
         }
     }
 }
@@ -124,28 +116,23 @@ private fun NavIconButton(
     selected: Boolean,
     icon: ImageVector,
     label: String,
+    accentColor: Color,
     onClick: () -> Unit,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
-    val pressed by interactionSource.collectIsPressedAsState()
-    val backgroundColor = animateColorAsState(
-        targetValue = if (selected) NavSelected else NavSurface,
-        animationSpec = tween(durationMillis = 220),
-        label = "navBackgroundColor",
-    )
     val iconTint = animateColorAsState(
-        targetValue = if (selected) NavIcon else NavIconMuted,
+        targetValue = if (selected) accentColor else NavIconMuted,
         animationSpec = tween(durationMillis = 220),
         label = "navIconTint",
     )
 
     Box(
         modifier = modifier
-            .pressScale(interactionSource)
+            .hapticPressScale(interactionSource)
             .softUiSurface(
                 shape = RoundedCornerShape(23.dp),
-                style = if (selected || pressed) SoftUiSurfaceStyle.Inset else SoftUiSurfaceStyle.Raised,
-                color = if (pressed) softUiPressedColor(backgroundColor.value) else backgroundColor.value,
+                style = if (selected) SoftUiSurfaceStyle.Inset else SoftUiSurfaceStyle.Raised,
+                color = if (selected) NavSelected else Color.Transparent,
             )
             .clickable(
                 interactionSource = interactionSource,

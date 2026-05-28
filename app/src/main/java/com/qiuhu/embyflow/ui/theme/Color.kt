@@ -1,7 +1,25 @@
 package com.qiuhu.embyflow.ui.theme
 
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.material3.ColorScheme
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+
+@Immutable
+data class DynamicAccentColors(
+    val primary: Color = AccentGreen,
+    val surfaceTint: Color = AccentGreen.copy(alpha = 0.12f),
+    val heroGradientEnd: Color = Color(0xB3000000),
+)
+
+val LocalDynamicAccent = staticCompositionLocalOf { DynamicAccentColors() }
+
+@OptIn(ExperimentalSharedTransitionApi::class)
+val LocalSharedTransitionScope = staticCompositionLocalOf<SharedTransitionScope?> { null }
+val LocalAnimatedVisibilityScope = staticCompositionLocalOf<AnimatedVisibilityScope?> { null }
 
 val BackgroundTop = Color(0xFFD8DFE7)
 val BackgroundMid = Color(0xFFD2D9E2)

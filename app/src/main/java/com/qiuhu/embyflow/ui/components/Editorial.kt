@@ -1,7 +1,8 @@
 package com.qiuhu.embyflow.ui.components
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
@@ -34,12 +35,14 @@ val EditorialShadow = SoftUiShadowDark
 val EditorialChip = SoftUiSurfacePressed
 val EditorialAccent = SoftUiAccent
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun EditorialCard(
     modifier: Modifier = Modifier,
     shape: Shape = RoundedCornerShape(20.dp),
     color: Color = EditorialSurface,
     onClick: (() -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
     surfaceStyle: SoftUiSurfaceStyle = SoftUiSurfaceStyle.Raised,
     contentPadding: PaddingValues = PaddingValues(18.dp),
     content: @Composable BoxScope.() -> Unit,
@@ -51,7 +54,7 @@ fun EditorialCard(
 
     Box(
         modifier = modifier
-            .pressScale(
+            .hapticPressScale(
                 interactionSource = interactionSource,
                 enabled = onClick != null,
             )
@@ -61,11 +64,12 @@ fun EditorialCard(
                 color = resolvedColor,
             )
             .then(
-                if (onClick != null) {
-                    Modifier.clickable(
+                if (onClick != null || onLongClick != null) {
+                    Modifier.combinedClickable(
                         interactionSource = interactionSource,
                         indication = null,
-                        onClick = onClick,
+                        onClick = onClick ?: {},
+                        onLongClick = onLongClick,
                     )
                 } else {
                     Modifier

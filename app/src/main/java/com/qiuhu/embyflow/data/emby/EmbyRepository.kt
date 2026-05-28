@@ -3,8 +3,11 @@ package com.qiuhu.embyflow.data.emby
 import android.net.Uri
 import android.util.Log
 import com.qiuhu.embyflow.BuildConfig
+import com.qiuhu.embyflow.data.settings.LibraryFilterSpec
 import com.qiuhu.embyflow.data.settings.librarySortSpec
+import com.qiuhu.embyflow.model.ChapterInfo
 import com.qiuhu.embyflow.model.EmbyHomePayload
+import com.qiuhu.embyflow.model.TrickplayInfo
 import com.qiuhu.embyflow.model.MediaItem
 import com.qiuhu.embyflow.model.MediaPerson
 import com.qiuhu.embyflow.model.MediaTag
@@ -259,7 +262,7 @@ class EmbyRepository(
         "MediaBrowser Client=\"AureP\", Device=\"Android\", DeviceId=\"aurep-android\", Version=\"${BuildConfig.VERSION_NAME}\""
     private val browseFields =
         "PrimaryImageAspectRatio,Overview,CommunityRating,PremiereDate,Genres,RunTimeTicks,BackdropImageTags,ImageTags,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber,ProductionYear,OfficialRating,RecursiveItemCount,ChildCount,ParentId"
-    private val detailFields = "People,$browseFields"
+    private val detailFields = "People,Trickplay,$browseFields"
 
     suspend fun bootstrap(
         username: String,
@@ -296,6 +299,10 @@ class EmbyRepository(
             userId = session.userId,
             token = session.accessToken,
         )
+        val nextUpItems = loadNextUpItems(
+            userId = session.userId,
+            token = session.accessToken,
+        )
 
         val libraries = views.Items.map { item -> item.toMediaItem(token = session.accessToken) }
         val selectedLibraryId = libraries.firstOrNull()?.id
@@ -326,6 +333,7 @@ class EmbyRepository(
                 highlightItems = highlightItems,
                 latestItems = latest.map { it.toMediaItem(session.accessToken) },
                 resumeItems = resume.Items.map { it.toMediaItem(session.accessToken) },
+                nextUpItems = nextUpItems,
                 libraries = libraries,
                 selectedLibraryId = selectedLibraryId,
                 libraryItems = libraryPage.items,
@@ -391,19 +399,20 @@ class EmbyRepository(
             return@withContext emptyList()
         }
 
+        val minCount = 20
         var windowDays = 7L
         while (windowDays <= 365L) {
             val threshold = Instant.now().minus(windowDays, ChronoUnit.DAYS)
             val itemsInWindow = candidates
                 .filter { (_, createdAt) -> createdAt != null && !createdAt.isBefore(threshold) }
                 .map { it.first }
-            if (itemsInWindow.isNotEmpty()) {
+            if (itemsInWindow.size >= minCount) {
                 return@withContext itemsInWindow
             }
             windowDays += 7L
         }
 
-        return@withContext candidates.map { it.first }
+        return@withContext candidates.map { it.first }.take(maxOf(minCount, candidates.size))
     }
 
     suspend fun loadLibraryItems(
@@ -412,6 +421,7 @@ class EmbyRepository(
         parentId: String,
         collectionType: String,
         sortMode: String,
+        filter: LibraryFilterSpec = LibraryFilterSpec(),
         startIndex: Int = 0,
         limit: Int = LibraryPageSize,
     ): EmbyPagedMediaItems = withContext(Dispatchers.IO) {
@@ -420,7 +430,22 @@ class EmbyRepository(
             "tvshows" -> "Series"
             else -> "Movie,Episode,Series,Video"
         }
-        val query = listOf(
+        val filterParams = buildList {
+            if (filter.genres.isNotEmpty()) {
+                add("Genres" to filter.genres.joinToString(","))
+            }
+            if (filter.years.isNotEmpty()) {
+                add("Years" to filter.years.joinToString(","))
+            }
+            if (filter.unplayedOnly || filter.favoritesOnly) {
+                val filters = buildList {
+                    if (filter.unplayedOnly) add("IsUnplayed")
+                    if (filter.favoritesOnly) add("IsFavorite")
+                }
+                add("Filters" to filters.joinToString(","))
+            }
+        }
+        val query = (listOf(
             "ParentId" to parentId,
             "Recursive" to "true",
             "SortBy" to sortSpec.sortBy,
@@ -429,7 +454,7 @@ class EmbyRepository(
             "Limit" to limit.toString(),
             "IncludeItemTypes" to includeItemTypes,
             "Fields" to browseFields,
-        ).joinToString("&") { (key, value) ->
+        ) + filterParams).joinToString("&") { (key, value) ->
             "${key.urlEncode()}=${value.urlEncode()}"
         }
 
@@ -443,6 +468,30 @@ class EmbyRepository(
             items = items,
             totalCount = result.TotalRecordCount,
         )
+    }
+
+    suspend fun loadLibraryGenres(
+        userId: String,
+        token: String,
+        parentId: String,
+        includeItemTypes: String,
+    ): List<String> = withContext(Dispatchers.IO) {
+        val query = listOf(
+            "ParentId" to parentId,
+            "Recursive" to "true",
+            "IncludeItemTypes" to includeItemTypes,
+            "Fields" to "None",
+            "EnableImages" to "false",
+            "EnableTotalRecordCount" to "false",
+        ).joinToString("&") { (key, value) ->
+            "${key.urlEncode()}=${value.urlEncode()}"
+        }
+        runCatching {
+            get<QueryResultDto>(
+                path = "/Genres?UserId=$userId&$query",
+                token = token,
+            ).Items.mapNotNull { it.Name.takeIf { name -> name.isNotBlank() } }.distinct().sorted()
+        }.getOrDefault(emptyList())
     }
 
     suspend fun loadItemsForTag(
@@ -851,6 +900,29 @@ class EmbyRepository(
         )
     }
 
+    suspend fun markPlayed(
+        userId: String,
+        token: String,
+        itemId: String,
+    ) = withContext(Dispatchers.IO) {
+        postEmpty(
+            path = "/Users/$userId/PlayedItems/$itemId",
+            token = token,
+            body = "",
+        )
+    }
+
+    suspend fun markUnplayed(
+        userId: String,
+        token: String,
+        itemId: String,
+    ) = withContext(Dispatchers.IO) {
+        delete(
+            path = "/Users/$userId/PlayedItems/$itemId",
+            token = token,
+        )
+    }
+
     private fun buildPlaybackCheckInDto(
         state: EmbyPlaybackSessionState,
         eventName: String?,
@@ -923,6 +995,26 @@ class EmbyRepository(
         ).Items
             .firstOrNull()
             ?.toMediaItem(token = token)
+    }
+
+    private fun loadNextUpItems(
+        userId: String,
+        token: String,
+        limit: Int = 20,
+    ): List<MediaItem> {
+        val query = listOf(
+            "UserId" to userId,
+            "Limit" to limit.toString(),
+            "Fields" to browseFields,
+        ).joinToString("&") { (key, value) ->
+            "${key.urlEncode()}=${value.urlEncode()}"
+        }
+
+        return get<QueryResultDto>(
+            path = "/Shows/NextUp?$query",
+            token = token,
+        ).Items
+            .map { it.toMediaItem(token = token) }
     }
 
     private fun loadFirstEpisodeForSeries(
@@ -1118,6 +1210,34 @@ class EmbyRepository(
         }
     }
 
+    private fun delete(
+        path: String,
+        token: String? = null,
+    ) {
+        val request = Request.Builder()
+            .url("$baseUrl$path")
+            .header("Accept-Encoding", "identity")
+            .header("X-Emby-Authorization", authorizationHeader)
+            .apply {
+                if (token != null) {
+                    header("X-Emby-Token", token)
+                }
+            }
+            .delete()
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            updateBaseUrlFromResponse(
+                finalUrl = response.request.url,
+                requestedPath = path,
+            )
+            val responseBody = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IllegalStateException("HTTP ${response.code}: $responseBody")
+            }
+        }
+    }
+
     private fun updateBaseUrlFromResponse(
         finalUrl: HttpUrl,
         requestedPath: String,
@@ -1247,6 +1367,31 @@ class EmbyRepository(
             unplayedItemCount = UserData?.UnplayedItemCount,
             isFolder = IsFolder,
             resumePositionMs = ((UserData?.PlaybackPositionTicks ?: 0L) / 10_000L).coerceAtLeast(0L),
+            played = UserData?.Played ?: false,
+            playedPercentage = run {
+                val ticks = UserData?.PlaybackPositionTicks ?: 0L
+                val duration = RunTimeTicks ?: 0L
+                if (ticks > 0 && duration > 0) (ticks.toFloat() / duration.toFloat()).coerceIn(0f, 1f) else 0f
+            },
+            chapters = Chapters.map { chapter ->
+                ChapterInfo(
+                    name = chapter.Name,
+                    startPositionMs = (chapter.StartPositionTicks / 10_000L).coerceAtLeast(0L),
+                )
+            },
+            trickplay = Trickplay.mapNotNull { (key, info) ->
+                val width = key.toIntOrNull() ?: return@mapNotNull null
+                width to TrickplayInfo(
+                    width = info.Width,
+                    height = info.Height,
+                    tileWidth = info.TileWidth,
+                    tileHeight = info.TileHeight,
+                    thumbnailCount = info.ThumbnailCount,
+                    interval = info.Interval,
+                    baseUrl = baseUrl,
+                    itemId = Id,
+                )
+            }.toMap(),
         )
     }
 

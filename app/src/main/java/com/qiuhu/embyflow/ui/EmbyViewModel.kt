@@ -20,6 +20,9 @@ import com.qiuhu.embyflow.data.search.SearchHistoryStore
 import com.qiuhu.embyflow.data.server.ServerProfilesStore
 import com.qiuhu.embyflow.data.settings.AppSettings
 import com.qiuhu.embyflow.data.settings.AppSettingsStore
+import com.qiuhu.embyflow.data.settings.LibraryFilterSpec
+import com.qiuhu.embyflow.data.settings.libraryFilterFor
+import com.qiuhu.embyflow.data.settings.isActive
 import com.qiuhu.embyflow.data.settings.normalizeLibrarySortMode
 import com.qiuhu.embyflow.model.EmbyHomePayload
 import com.qiuhu.embyflow.model.MediaItem
@@ -155,6 +158,9 @@ class EmbyViewModel(
     private val _settings = MutableStateFlow(AppSettings())
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
 
+    private val _availableGenres = MutableStateFlow<List<String>>(emptyList())
+    val availableGenres: StateFlow<List<String>> = _availableGenres.asStateFlow()
+
     private val _tagBrowseState = MutableStateFlow(TagBrowseState())
     val tagBrowseState: StateFlow<TagBrowseState> = _tagBrowseState.asStateFlow()
 
@@ -179,6 +185,10 @@ class EmbyViewModel(
         ),
     )
     val appUpdateState: StateFlow<AppUpdateState> = _appUpdateState.asStateFlow()
+
+    private val _sleepTimerEndMs = MutableStateFlow<Long?>(null)
+    val sleepTimerEndMs: StateFlow<Long?> = _sleepTimerEndMs.asStateFlow()
+    private var sleepTimerJob: Job? = null
 
     init {
         observeSettings()
@@ -402,6 +412,41 @@ class EmbyViewModel(
         }
     }
 
+    fun updateShowEpisodeTitle(value: Boolean) {
+        viewModelScope.launch {
+            settingsStore.updateShowEpisodeTitle(value)
+        }
+    }
+
+    fun updateLibraryFilter(libraryId: String, filter: LibraryFilterSpec) {
+        val currentFilter = _settings.value.libraryFilterFor(libraryId)
+        if (currentFilter == filter) return
+
+        _settings.update { current ->
+            current.copy(libraryFilters = current.libraryFilters + (libraryId to filter))
+        }
+
+        viewModelScope.launch {
+            settingsStore.updateLibraryFilter(libraryId, filter)
+
+            val activeSession = session ?: return@launch
+            val repository = repository ?: return@launch
+            val currentState = _uiState.value as? EmbyUiState.Ready ?: return@launch
+            val selectedLibraryId = currentState.payload.selectedLibraryId ?: return@launch
+
+            reloadLibrary(
+                repository = repository,
+                activeSession = activeSession,
+                currentPayload = currentState.payload,
+                parentId = selectedLibraryId,
+                sortMode = _settings.value.librarySortMode,
+                filter = filter,
+                updateSelection = false,
+                append = false,
+            )
+        }
+    }
+
     fun updateLibrarySortMode(value: String) {
         val normalized = normalizeLibrarySortMode(value)
         if (_settings.value.librarySortMode == normalized) {
@@ -426,6 +471,7 @@ class EmbyViewModel(
                 currentPayload = currentState.payload,
                 parentId = selectedLibraryId,
                 sortMode = normalized,
+                filter = _settings.value.libraryFilterFor(selectedLibraryId),
                 updateSelection = false,
                 append = false,
             )
@@ -444,6 +490,32 @@ class EmbyViewModel(
         viewModelScope.launch {
             settingsStore.updateExperimentalDualBackendRace(value)
         }
+    }
+
+    fun updateHomeModuleOrder(order: List<String>) {
+        _settings.update { it.copy(homeModuleOrder = order) }
+        viewModelScope.launch { settingsStore.updateHomeModuleOrder(order) }
+    }
+
+    fun toggleHomeModuleHidden(moduleId: String) {
+        val current = _settings.value.homeModuleHidden
+        val updated = if (moduleId in current) current - moduleId else current + moduleId
+        _settings.update { it.copy(homeModuleHidden = updated) }
+        viewModelScope.launch { settingsStore.updateHomeModuleHidden(updated) }
+    }
+
+    fun updateHomeModuleHidden(hidden: Set<String>) {
+        _settings.update { it.copy(homeModuleHidden = hidden) }
+        viewModelScope.launch { settingsStore.updateHomeModuleHidden(hidden) }
+    }
+
+    fun updateLibraryColumnCount(count: Int) {
+        val clamped = count.coerceIn(
+            com.qiuhu.embyflow.data.settings.LIBRARY_COLUMN_COUNT_MIN,
+            com.qiuhu.embyflow.data.settings.LIBRARY_COLUMN_COUNT_MAX,
+        )
+        _settings.update { it.copy(libraryColumnCount = clamped) }
+        viewModelScope.launch { settingsStore.updateLibraryColumnCount(clamped) }
     }
 
     fun refreshAppUpdateStatus() {
@@ -599,6 +671,37 @@ class EmbyViewModel(
 
     fun closeActorBrowse() {
         _actorBrowseState.value = ActorBrowseState()
+    }
+
+    fun toggleItemPlayed(media: MediaItem) {
+        val activeSession = session ?: return
+        val repository = repository ?: return
+        viewModelScope.launch {
+            runCatching {
+                if (media.played) {
+                    repository.markUnplayed(activeSession.userId, activeSession.accessToken, media.id)
+                } else {
+                    repository.markPlayed(activeSession.userId, activeSession.accessToken, media.id)
+                }
+            }
+        }
+    }
+
+    fun setSleepTimer(durationMs: Long) {
+        cancelSleepTimer()
+        val endMs = SystemClock.elapsedRealtime() + durationMs
+        _sleepTimerEndMs.value = endMs
+        sleepTimerJob = viewModelScope.launch {
+            delay(durationMs)
+            _sleepTimerEndMs.value = null
+            closePlayer()
+        }
+    }
+
+    fun cancelSleepTimer() {
+        sleepTimerJob?.cancel()
+        sleepTimerJob = null
+        _sleepTimerEndMs.value = null
     }
 
     fun updateSearchQuery(value: String) {
@@ -828,9 +931,42 @@ class EmbyViewModel(
                 currentPayload = currentState.payload,
                 parentId = viewId,
                 sortMode = _settings.value.librarySortMode,
+                filter = _settings.value.libraryFilterFor(viewId),
                 updateSelection = true,
                 append = false,
             )
+        }
+
+        val collectionType = currentState.payload.libraries
+            .firstOrNull { it.id == viewId }
+            ?.collectionType
+            .orEmpty()
+        loadAvailableGenres(repository, activeSession, viewId, collectionType)
+    }
+
+    private fun loadAvailableGenres(
+        repository: EmbyRepository,
+        activeSession: EmbySession,
+        parentId: String,
+        collectionType: String,
+    ) {
+        val includeItemTypes = when (collectionType.lowercase(java.util.Locale.US)) {
+            "tvshows" -> "Series"
+            else -> "Movie,Episode,Series,Video"
+        }
+        viewModelScope.launch {
+            runCatching {
+                repository.loadLibraryGenres(
+                    userId = activeSession.userId,
+                    token = activeSession.accessToken,
+                    parentId = parentId,
+                    includeItemTypes = includeItemTypes,
+                )
+            }.onSuccess { genres ->
+                _availableGenres.value = genres
+            }.onFailure {
+                _availableGenres.value = emptyList()
+            }
         }
     }
 
@@ -853,6 +989,7 @@ class EmbyViewModel(
                 currentPayload = currentState.payload,
                 parentId = selectedLibraryId,
                 sortMode = _settings.value.librarySortMode,
+                filter = _settings.value.libraryFilterFor(selectedLibraryId),
                 updateSelection = false,
                 append = true,
             )
@@ -1707,6 +1844,7 @@ class EmbyViewModel(
         currentPayload: EmbyHomePayload,
         parentId: String,
         sortMode: String,
+        filter: LibraryFilterSpec = LibraryFilterSpec(),
         updateSelection: Boolean,
         append: Boolean,
     ) {
@@ -1732,6 +1870,7 @@ class EmbyViewModel(
                 parentId = parentId,
                 collectionType = collectionType,
                 sortMode = sortMode,
+                filter = filter,
                 startIndex = if (append) currentPayload.libraryItems.size else 0,
             )
         }.onSuccess { page ->
@@ -1838,6 +1977,8 @@ private fun MediaItem.mergeWithResumeFallback(
     childCount = childCount ?: fallback.childCount,
     unplayedItemCount = unplayedItemCount ?: fallback.unplayedItemCount,
     resumePositionMs = maxOf(resumePositionMs, fallback.resumePositionMs),
+    chapters = if (chapters.isNotEmpty()) chapters else fallback.chapters,
+    trickplay = if (trickplay.isNotEmpty()) trickplay else fallback.trickplay,
 )
 
 private fun resumeGroupingKey(media: MediaItem): String = when {

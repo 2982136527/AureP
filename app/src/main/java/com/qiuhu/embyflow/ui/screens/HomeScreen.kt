@@ -1,7 +1,9 @@
 package com.qiuhu.embyflow.ui.screens
 
+import android.graphics.drawable.BitmapDrawable
 import android.os.SystemClock
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -24,6 +26,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -45,6 +48,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -86,12 +90,22 @@ import com.qiuhu.embyflow.ui.components.EditorialTextPrimary
 import com.qiuhu.embyflow.ui.components.EditorialTextSecondary
 import com.qiuhu.embyflow.ui.components.MediaPosterCornerBadge
 import com.qiuhu.embyflow.ui.components.PixelCatAsyncImage
-import com.qiuhu.embyflow.ui.components.pressScale
+import com.qiuhu.embyflow.ui.theme.DynamicAccentColors
+import com.qiuhu.embyflow.ui.theme.LocalAnimatedVisibilityScope
+import com.qiuhu.embyflow.ui.theme.LocalDynamicAccent
+import com.qiuhu.embyflow.ui.theme.LocalSharedTransitionScope
+import androidx.palette.graphics.Palette
+import com.qiuhu.embyflow.ui.components.hapticPressScale
 import com.qiuhu.embyflow.ui.components.softUiRaisedSurface
 import com.qiuhu.embyflow.ui.components.softUiSurface
 import com.qiuhu.embyflow.ui.components.SoftUiShadowDark
 import com.qiuhu.embyflow.ui.components.SoftUiSurfacePressed
 import com.qiuhu.embyflow.ui.components.SoftUiSurfaceStyle
+import com.qiuhu.embyflow.data.settings.HOME_MODULE_CONTINUE_WATCHING
+import com.qiuhu.embyflow.data.settings.HOME_MODULE_HERO
+import com.qiuhu.embyflow.data.settings.HOME_MODULE_HIGHLIGHTS
+import com.qiuhu.embyflow.data.settings.HOME_MODULE_NEXT_UP
+import com.qiuhu.embyflow.data.settings.HOME_MODULE_ORDER_DEFAULT
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -114,12 +128,17 @@ private const val TodayResumeVisibleCards = 1.5f
 fun HomeScreen(
     isTabActive: Boolean,
     layoutMode: String,
+    showEpisodeTitle: Boolean = true,
     heroItems: List<MediaItem>,
     highlightItems: List<MediaItem>,
     continueWatchingItems: List<MediaItem>,
+    nextUpItems: List<MediaItem>,
+    homeModuleOrder: List<String> = HOME_MODULE_ORDER_DEFAULT,
+    homeModuleHidden: Set<String> = emptySet(),
     libraries: List<MediaItem>,
     isServerConnected: Boolean,
     hasConfiguredServer: Boolean,
+    onAccentColorChanged: (Color) -> Unit = {},
     onOpenMedia: (MediaItem) -> Unit,
     onOpenLibrary: (MediaItem) -> Unit,
 ) {
@@ -144,6 +163,9 @@ fun HomeScreen(
                     else -> 6
                 },
             )
+    }
+    val nextUpDisplayItems = remember(nextUpItems) {
+        nextUpItems.distinctBy { it.seriesId ?: it.id }.take(12)
     }
     val heroWidthFraction = when {
         isCompactLayout -> 0.72f
@@ -209,93 +231,113 @@ fun HomeScreen(
                     }
                 }
             } else {
-                item(
-                    key = "home-hero",
-                    contentType = "hero",
-                ) {
-                    TodayHeroCarousel(
-                        isTabActive = isTabActive,
-                        items = heroRotationPool,
-                        cardWidthFraction = heroWidthFraction,
-                        cardHeight = heroCardHeight,
-                        onOpenMedia = onOpenMedia,
-                    )
-                }
+                val visibleModules = homeModuleOrder.filter { it !in homeModuleHidden }
 
-                if (highlights.isNotEmpty()) {
-                    item(
-                        key = "home-highlights-header",
-                        contentType = "section-header",
-                    ) {
-                        TodaySectionHeader(
-                            title = "今日活动进行时",
-                        )
+                visibleModules.forEach { moduleId ->
+                    when (moduleId) {
+                        HOME_MODULE_HERO -> {
+                            item(
+                                key = "home-hero",
+                                contentType = "hero",
+                            ) {
+                                TodayHeroCarousel(
+                                    isTabActive = isTabActive,
+                                    items = heroRotationPool,
+                                    cardWidthFraction = heroWidthFraction,
+                                    cardHeight = heroCardHeight,
+                                    onAccentColorChanged = onAccentColorChanged,
+                                    onOpenMedia = onOpenMedia,
+                                )
+                            }
+                        }
+
+                        HOME_MODULE_HIGHLIGHTS -> {
+                            if (highlights.isNotEmpty()) {
+                                item(
+                                    key = "home-highlights-header",
+                                    contentType = "section-header",
+                                ) {
+                                    TodaySectionHeader(
+                                        title = "今日活动进行时",
+                                    )
+                                }
+
+                                item(
+                                    key = "home-highlights-row",
+                                    contentType = "highlights",
+                                ) {
+                                    TodayHighlightsRow(
+                                        isTabActive = isTabActive,
+                                        items = highlights,
+                                        itemSpacing = 8.dp,
+                                        onOpenMedia = onOpenMedia,
+                                    )
+                                }
+                            }
+                        }
+
+                        HOME_MODULE_NEXT_UP -> {
+                            if (nextUpDisplayItems.isNotEmpty()) {
+                                item(
+                                    key = "home-nextup-header",
+                                    contentType = "section-header",
+                                ) {
+                                    TodaySectionHeader(
+                                        title = "继续播放",
+                                    )
+                                }
+
+                                item(
+                                    key = "home-nextup-row",
+                                    contentType = "resume",
+                                ) {
+                                    TodayContinueWatchingRow(
+                                        items = nextUpDisplayItems,
+                                        itemSpacing = rowSpacing,
+                                        cardHeightRatio = resumeCardHeightRatio,
+                                        showEpisodeTitle = showEpisodeTitle,
+                                        onOpenMedia = onOpenMedia,
+                                    )
+                                }
+                            }
+                        }
+
+                        HOME_MODULE_CONTINUE_WATCHING -> {
+                            item(
+                                key = "home-resume-header",
+                                contentType = "section-header",
+                            ) {
+                                TodaySectionHeader(
+                                    title = "继续观看",
+                                )
+                            }
+
+                            if (resumeItems.isEmpty()) {
+                                item(
+                                    key = "home-resume-empty",
+                                    contentType = "info",
+                                ) {
+                                    TodayInfoCard(
+                                        title = "还没有继续观看内容",
+                                        description = "开始播放后，断点续播会出现在这里。",
+                                    )
+                                }
+                            } else {
+                                item(
+                                    key = "home-resume-row",
+                                    contentType = "resume",
+                                ) {
+                                    TodayContinueWatchingRow(
+                                        items = resumeItems,
+                                        itemSpacing = rowSpacing,
+                                        cardHeightRatio = resumeCardHeightRatio,
+                                        showEpisodeTitle = showEpisodeTitle,
+                                        onOpenMedia = onOpenMedia,
+                                    )
+                                }
+                            }
+                        }
                     }
-
-                    item(
-                        key = "home-highlights-row",
-                        contentType = "highlights",
-                    ) {
-                        TodayHighlightsRow(
-                            isTabActive = isTabActive,
-                            items = highlights,
-                            itemSpacing = 8.dp,
-                            onOpenMedia = onOpenMedia,
-                        )
-                    }
-                }
-
-                item(
-                    key = "home-resume-header",
-                    contentType = "section-header",
-                ) {
-                    TodaySectionHeader(
-                        title = "继续观看",
-                    )
-                }
-
-                if (resumeItems.isEmpty()) {
-                    item(
-                        key = "home-resume-empty",
-                        contentType = "info",
-                    ) {
-                        TodayInfoCard(
-                            title = "还没有继续观看内容",
-                            description = "开始播放后，断点续播会出现在这里。",
-                        )
-                    }
-                } else {
-                    item(
-                        key = "home-resume-row",
-                        contentType = "resume",
-                    ) {
-                        TodayContinueWatchingRow(
-                            items = resumeItems,
-                            itemSpacing = rowSpacing,
-                            cardHeightRatio = resumeCardHeightRatio,
-                            onOpenMedia = onOpenMedia,
-                        )
-                    }
-                }
-
-                item(
-                    key = "home-library-header",
-                    contentType = "section-header",
-                ) {
-                    TodaySectionHeader(
-                        title = "媒体库",
-                    )
-                }
-
-                items(
-                    items = libraries.take(libraryPreviewCount),
-                    key = { item -> item.id },
-                    contentType = { "library-row" },
-                ) { item ->
-                    TodayLibraryRow(
-                        media = item,
-                        onClick = { onOpenLibrary(item) },
-                    )
                 }
             }
         }
@@ -307,6 +349,7 @@ private fun TodayContinueWatchingRow(
     items: List<MediaItem>,
     itemSpacing: Dp,
     cardHeightRatio: Float,
+    showEpisodeTitle: Boolean,
     onOpenMedia: (MediaItem) -> Unit,
 ) {
     BoxWithConstraints(
@@ -333,6 +376,7 @@ private fun TodayContinueWatchingRow(
                     imageUrlOverride = item.continueWatchingCardImageUrl(),
                     transparentFooter = true,
                     preferTitleLogo = true,
+                    hideEpisodeSubtitle = !showEpisodeTitle,
                     topLeftLabel = item.continueWatchingResumeLabel(),
                     plainTopLabels = true,
                     onClick = { onOpenMedia(item.continueWatchingNavigationTarget()) },
@@ -507,6 +551,7 @@ private fun TodayHighlightsRow(
     }
 }
 
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun TodayPosterFeatureCard(
     media: MediaItem,
@@ -521,7 +566,7 @@ private fun TodayPosterFeatureCard(
 
     Column(
         modifier = modifier
-            .pressScale(interactionSource)
+            .hapticPressScale(interactionSource)
             .pointerInput(onPress) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
@@ -546,10 +591,20 @@ private fun TodayPosterFeatureCard(
                     shadowOffset = 8.dp,
                 ),
         ) {
+            val sharedScope = LocalSharedTransitionScope.current
+            val animScope = LocalAnimatedVisibilityScope.current
+            val imageModifier = if (sharedScope != null && animScope != null) {
+                with(sharedScope) {
+                    Modifier.fillMaxSize().sharedElement(
+                        rememberSharedContentState(key = "poster-${media.id}"),
+                        animatedVisibilityScope = animScope,
+                    )
+                }
+            } else Modifier.fillMaxSize()
             PixelCatAsyncImage(
                 model = imageUrl,
                 contentDescription = media.title,
-                modifier = Modifier.fillMaxSize(),
+                modifier = imageModifier,
                 contentScale = ContentScale.Crop,
             )
 
@@ -594,6 +649,7 @@ private fun TodayHeroCarousel(
     items: List<MediaItem>,
     cardWidthFraction: Float,
     cardHeight: Dp,
+    onAccentColorChanged: (Color) -> Unit = {},
     onOpenMedia: (MediaItem) -> Unit,
 ) {
     if (items.isEmpty()) return
@@ -726,6 +782,7 @@ private fun TodayHeroCarousel(
                     imageContentScale = ContentScale.Crop,
                     transparentFooter = true,
                     preferTitleLogo = true,
+                    onAccentColorChanged = onAccentColorChanged,
                     onClick = { onOpenMedia(item) },
                 )
             }
@@ -744,7 +801,7 @@ private fun TodaySectionHeader(
     ) {
         Text(
             text = title,
-            style = MaterialTheme.typography.headlineSmall,
+            style = MaterialTheme.typography.titleMedium,
             color = TodayTextPrimary,
             fontWeight = FontWeight.Black,
         )
@@ -758,6 +815,7 @@ private fun TodaySectionHeader(
     }
 }
 
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun TodayFeatureCard(
     media: MediaItem,
@@ -768,8 +826,10 @@ private fun TodayFeatureCard(
     adaptCardToImage: Boolean = false,
     transparentFooter: Boolean = false,
     preferTitleLogo: Boolean = false,
+    hideEpisodeSubtitle: Boolean = false,
     topLeftLabel: String? = null,
     plainTopLabels: Boolean = false,
+    onAccentColorChanged: (Color) -> Unit = {},
     onClick: () -> Unit,
 ) {
     val shape = RoundedCornerShape(16.dp)
@@ -778,6 +838,7 @@ private fun TodayFeatureCard(
     val badgeLabel = media.cardEpisodeBadgeLabel()
     val interactionSource = remember { MutableInteractionSource() }
     var imageAspectRatio by remember(imageUrl) { mutableStateOf(16f / 9f) }
+    var accentColor by remember(imageUrl) { mutableStateOf<Color?>(null) }
     val cardSizeModifier = if (adaptCardToImage) {
         Modifier
             .fillMaxWidth()
@@ -791,7 +852,7 @@ private fun TodayFeatureCard(
     Box(
         modifier = modifier
             .then(cardSizeModifier)
-            .pressScale(interactionSource)
+            .hapticPressScale(interactionSource)
             .softUiRaisedSurface(
                 shape = shape,
                 color = TodaySurface,
@@ -804,84 +865,135 @@ private fun TodayFeatureCard(
                 onClick = onClick,
             ),
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(2.dp)
-                .clip(imageShape)
-                .background(SoftUiSurfacePressed),
+        val dynamicColors = remember(accentColor) {
+            accentColor?.let { c ->
+                DynamicAccentColors(
+                    primary = c,
+                    surfaceTint = c.copy(alpha = 0.12f),
+                    heroGradientEnd = c.copy(alpha = 0.7f),
+                )
+            }
+        }
+        CompositionLocalProvider(
+            *(if (dynamicColors != null) arrayOf(LocalDynamicAccent provides dynamicColors) else emptyArray()),
         ) {
-            PixelCatAsyncImage(
-                model = imageUrl,
-                contentDescription = media.title,
-                modifier = Modifier.fillMaxSize(),
-                contentScale = imageContentScale,
-                onSuccess = { state ->
-                    if (adaptCardToImage) {
-                        val width = state.result.drawable.intrinsicWidth
-                        val heightPx = state.result.drawable.intrinsicHeight
-                        if (width > 0 && heightPx > 0) {
-                            imageAspectRatio = width.toFloat() / heightPx.toFloat()
-                        }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(2.dp)
+                    .clip(imageShape)
+                    .background(SoftUiSurfacePressed),
+            ) {
+                val sharedScope2 = LocalSharedTransitionScope.current
+                val animScope2 = LocalAnimatedVisibilityScope.current
+                val imageModifier2 = if (sharedScope2 != null && animScope2 != null) {
+                    with(sharedScope2) {
+                        Modifier.fillMaxSize().sharedElement(
+                            rememberSharedContentState(key = "poster-${media.id}"),
+                            animatedVisibilityScope = animScope2,
+                        )
                     }
-                },
-            )
-        }
-
-        if (!topLeftLabel.isNullOrBlank()) {
-            if (plainTopLabels) {
-                TodayTopOverlayLabel(
-                    text = topLeftLabel,
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(12.dp),
-                )
-            } else {
-                MediaPosterCornerBadge(
-                    text = topLeftLabel,
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(12.dp),
-                )
-            }
-        }
-
-        if (!badgeLabel.isNullOrBlank()) {
-            if (plainTopLabels) {
-                TodayTopOverlayLabel(
-                    text = badgeLabel,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(12.dp),
-                )
-            } else {
-                MediaPosterCornerBadge(
-                    text = badgeLabel,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(12.dp),
+                } else Modifier.fillMaxSize()
+                PixelCatAsyncImage(
+                    model = imageUrl,
+                    contentDescription = media.title,
+                    modifier = imageModifier2,
+                    contentScale = imageContentScale,
+                    onSuccess = { state ->
+                        if (adaptCardToImage) {
+                            val width = state.result.drawable.intrinsicWidth
+                            val heightPx = state.result.drawable.intrinsicHeight
+                            if (width > 0 && heightPx > 0) {
+                                imageAspectRatio = width.toFloat() / heightPx.toFloat()
+                            }
+                        }
+                        val bitmap = (state.result.drawable as? BitmapDrawable)?.bitmap
+                        if (bitmap != null) {
+                            val safeBitmap = if (bitmap.config == android.graphics.Bitmap.Config.HARDWARE) {
+                                bitmap.copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+                            } else bitmap
+                            val palette = Palette.from(safeBitmap!!).generate()
+                            val rgb = palette.vibrantSwatch?.rgb
+                                ?: palette.dominantSwatch?.rgb
+                                ?: palette.mutedSwatch?.rgb
+                            if (rgb != null) {
+                                accentColor = Color(rgb)
+                                onAccentColorChanged(Color(rgb))
+                            }
+                        }
+                    },
                 )
             }
-        }
 
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Transparent),
-        )
+            if (!topLeftLabel.isNullOrBlank()) {
+                if (plainTopLabels) {
+                    TodayTopOverlayLabel(
+                        text = topLeftLabel,
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(12.dp),
+                    )
+                } else {
+                    MediaPosterCornerBadge(
+                        text = topLeftLabel,
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(12.dp),
+                    )
+                }
+            }
 
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 18.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.Bottom,
-        ) {
-            TodayCardFooter(
-                media = media,
-                transparent = transparentFooter,
-                preferTitleLogo = preferTitleLogo,
-                topLeftLabel = topLeftLabel,
-            )
+            if (!badgeLabel.isNullOrBlank()) {
+                if (plainTopLabels) {
+                    TodayTopOverlayLabel(
+                        text = badgeLabel,
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(12.dp),
+                    )
+                } else {
+                    MediaPosterCornerBadge(
+                        text = badgeLabel,
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(12.dp),
+                    )
+                }
+            }
+
+            if (transparentFooter) {
+                val gradientEnd = accentColor?.copy(alpha = 0.7f)
+                    ?: Color(0xB3000000)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.BottomCenter)
+                        .fillMaxHeight(0.55f)
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    Color.Transparent,
+                                    gradientEnd,
+                                ),
+                            ),
+                        ),
+                )
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(start = 10.dp, end = 18.dp, top = 16.dp, bottom = 10.dp),
+                verticalArrangement = Arrangement.Bottom,
+            ) {
+                TodayCardFooter(
+                    media = media,
+                    transparent = transparentFooter,
+                    preferTitleLogo = preferTitleLogo,
+                    hideEpisodeSubtitle = hideEpisodeSubtitle,
+                    topLeftLabel = topLeftLabel,
+                )
+            }
         }
     }
 }
@@ -913,6 +1025,7 @@ private fun TodayCardFooter(
     compact: Boolean = false,
     transparent: Boolean = false,
     preferTitleLogo: Boolean = false,
+    hideEpisodeSubtitle: Boolean = false,
     topLeftLabel: String? = null,
 ) {
     val logoModel = when {
@@ -960,22 +1073,24 @@ private fun TodayCardFooter(
                 } else {
                     Text(
                         text = primaryEpisodeTitle,
-                        style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
+                        style = if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.bodyMedium,
                         color = overlayTitleColor,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                secondaryEpisodeTitle?.let { episodeTitle ->
-                    Text(
-                        text = episodeTitle,
-                        style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
-                        color = overlayTitleColor,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                if (!hideEpisodeSubtitle) {
+                    secondaryEpisodeTitle?.let { episodeTitle ->
+                        Text(
+                            text = episodeTitle,
+                            style = if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.bodyMedium,
+                            color = overlayTitleColor,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             } else {
                 TodayCardTitle(
@@ -1017,7 +1132,7 @@ private fun TodayCardTitle(
 
     Text(
         text = media.title,
-        style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
+        style = if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.bodyMedium,
         color = textColor,
         fontWeight = FontWeight.SemiBold,
         maxLines = 1,
@@ -1036,10 +1151,10 @@ private fun TodayCardLogo(
         model = model,
         contentDescription = contentDescription,
         modifier = Modifier
-            .fillMaxWidth(if (compact) 0.74f else 0.82f)
+            .fillMaxWidth(if (compact) 0.5f else 0.55f)
             .heightIn(
-                min = if (compact) 24.dp else 28.dp,
-                max = if (compact) 30.dp else 38.dp,
+                min = if (compact) 14.dp else 18.dp,
+                max = if (compact) 20.dp else 24.dp,
             ),
         contentScale = ContentScale.Fit,
         alignment = Alignment.CenterStart,
@@ -1048,7 +1163,7 @@ private fun TodayCardLogo(
         error = {
             Text(
                 text = contentDescription.orEmpty(),
-                style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
+                style = if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.bodyMedium,
                 color = fallbackTextColor,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
@@ -1119,7 +1234,7 @@ private fun TodayLibraryRow(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp)
-            .pressScale(interactionSource)
+            .hapticPressScale(interactionSource)
             .softUiRaisedSurface(
                 shape = RoundedCornerShape(24.dp),
                 color = TodaySurface,

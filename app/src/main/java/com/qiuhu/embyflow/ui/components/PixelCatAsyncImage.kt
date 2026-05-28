@@ -29,8 +29,10 @@ fun PixelCatAsyncImage(
 
     Box(modifier = modifier) {
         if (painter.state !is AsyncImagePainter.State.Success) {
-            PixelCatPlaceholder(
-                modifier = Modifier.fillMaxSize(),
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .skeletonPlaceholder(),
             )
         }
 

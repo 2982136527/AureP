@@ -28,7 +28,9 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -38,15 +40,21 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.CollectionsBookmark
+import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.PlayCircle
+import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.ViewModule
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Done
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.automirrored.rounded.PlaylistPlay
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.Subtitles
 import androidx.compose.material.icons.rounded.Tune
@@ -82,6 +90,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.AnnotatedString
 import com.qiuhu.embyflow.data.update.AppUpdateState
 import com.qiuhu.embyflow.data.settings.AppSettings
+import com.qiuhu.embyflow.data.settings.HOME_MODULE_LABELS
+import com.qiuhu.embyflow.data.settings.HOME_MODULE_HERO
+import com.qiuhu.embyflow.data.settings.HOME_MODULE_HIGHLIGHTS
+import com.qiuhu.embyflow.data.settings.HOME_MODULE_NEXT_UP
+import com.qiuhu.embyflow.data.settings.HOME_MODULE_CONTINUE_WATCHING
 import com.qiuhu.embyflow.data.settings.PLAYER_MODE_COMPATIBILITY
 import com.qiuhu.embyflow.data.settings.PLAYER_MODE_STANDARD
 import com.qiuhu.embyflow.data.settings.PLAYER_MODE_SYSTEM
@@ -132,6 +145,7 @@ private enum class SettingsSheetKey {
     EmbeddedSubtitle,
     ExternalSubtitle,
     Layout,
+    HomeModules,
 }
 
 @Composable
@@ -147,7 +161,10 @@ fun SettingsScreen(
     onUpdateExternalSubtitleLanguage: (String) -> Unit,
     onUpdateLayoutMode: (String) -> Unit,
     onUpdateShowLibraryCardTitle: (Boolean) -> Unit,
+    onUpdateShowEpisodeTitle: (Boolean) -> Unit,
     onUpdateExperimentalDualBackendRace: (Boolean) -> Unit,
+    onUpdateHomeModuleOrder: (List<String>) -> Unit = {},
+    onUpdateHomeModuleHidden: (Set<String>) -> Unit = {},
     onRefreshAppUpdate: () -> Unit,
     onSaveServerProfile: (ServerProfile) -> Unit,
     onDeleteServerProfile: (String) -> Unit,
@@ -365,6 +382,70 @@ fun SettingsScreen(
             },
         )
 
+        SettingsSheetKey.HomeModules -> SettingsSheetModel(
+            title = "首页模块",
+            subtitle = "选择显示或隐藏的内容模块",
+            customContent = {
+                val moduleIds = settings.homeModuleOrder
+                moduleIds.forEach { moduleId ->
+                    val label = HOME_MODULE_LABELS[moduleId] ?: moduleId
+                    val visible = moduleId !in settings.homeModuleHidden
+                    SettingsToggleRow(
+                        label = label,
+                        description = if (visible) "显示中" else "已隐藏",
+                        icon = when (moduleId) {
+                            HOME_MODULE_HERO -> Icons.Rounded.AutoAwesome
+                            HOME_MODULE_HIGHLIGHTS -> Icons.Rounded.Star
+                            HOME_MODULE_NEXT_UP -> Icons.Rounded.PlayCircle
+                            HOME_MODULE_CONTINUE_WATCHING -> Icons.Rounded.History
+                            else -> Icons.Rounded.ViewModule
+                        },
+                        checked = visible,
+                        onToggle = {
+                            val newHidden = if (moduleId in settings.homeModuleHidden) {
+                                settings.homeModuleHidden - moduleId
+                            } else {
+                                settings.homeModuleHidden + moduleId
+                            }
+                            onUpdateHomeModuleHidden(newHidden)
+                        },
+                    ).let { row ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { row.onToggle(!row.checked) }
+                                .padding(horizontal = 20.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                imageVector = row.icon,
+                                contentDescription = null,
+                                modifier = Modifier.size(22.dp),
+                                tint = EditorialTextSecondary,
+                            )
+                            Spacer(modifier = Modifier.width(14.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = row.label,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = EditorialTextPrimary,
+                                )
+                                Text(
+                                    text = row.description,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = EditorialTextSecondary,
+                                )
+                            }
+                            Switch(
+                                checked = row.checked,
+                                onCheckedChange = { row.onToggle(it) },
+                            )
+                        }
+                    }
+                }
+            },
+        )
+
         null -> null
     }
 
@@ -465,6 +546,7 @@ fun SettingsScreen(
                         SettingsRow("内嵌字幕", settings.embeddedSubtitleLanguage, Icons.Rounded.Subtitles) { activeSheet = SettingsSheetKey.EmbeddedSubtitle },
                         SettingsRow("外挂字幕", settings.externalSubtitleLanguage, Icons.Rounded.Subtitles) { activeSheet = SettingsSheetKey.ExternalSubtitle },
                         SettingsRow("界面风格", settings.layoutMode, Icons.Rounded.Tune) { activeSheet = SettingsSheetKey.Layout },
+                        SettingsRow("首页模块", "${settings.homeModuleOrder.size - settings.homeModuleHidden.size} 个模块可见", Icons.Rounded.ViewModule) { activeSheet = SettingsSheetKey.HomeModules },
                     ),
                 )
             }
@@ -479,6 +561,21 @@ fun SettingsScreen(
                             icon = Icons.Rounded.CollectionsBookmark,
                             checked = settings.showLibraryCardTitle,
                             onToggle = onUpdateShowLibraryCardTitle,
+                        ),
+                    ),
+                )
+            }
+
+            item {
+                SettingsToggleGroup(
+                    title = "首页",
+                    rows = listOf(
+                        SettingsToggleRow(
+                            label = "显示集标题",
+                            description = "继续观看中电视剧是否显示集标题",
+                            icon = Icons.AutoMirrored.Rounded.PlaylistPlay,
+                            checked = settings.showEpisodeTitle,
+                            onToggle = onUpdateShowEpisodeTitle,
                         ),
                     ),
                 )

@@ -1,7 +1,8 @@
 package com.qiuhu.embyflow.ui.components
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -14,25 +15,35 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CollectionsBookmark
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.qiuhu.embyflow.model.MediaItem
+import com.qiuhu.embyflow.ui.theme.LocalAnimatedVisibilityScope
+import com.qiuhu.embyflow.ui.theme.LocalSharedTransitionScope
 
 enum class MediaPosterCardStyle {
     Default,
@@ -66,6 +77,75 @@ fun MediaPosterCornerBadge(
 }
 
 @Composable
+private fun MediaWatchedOverlay(
+    played: Boolean,
+    playedPercentage: Float,
+    modifier: Modifier = Modifier,
+) {
+    if (!played && playedPercentage <= 0f) return
+
+    Box(modifier = modifier) {
+        if (played) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0x15000000)),
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(6.dp)
+                    .size(22.dp)
+                    .clip(CircleShape)
+                    .background(Color(0x99000000)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Check,
+                    contentDescription = "已看完",
+                    tint = Color.White,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
+        } else if (playedPercentage > 0f) {
+            val trackColor = Color(0x55000000)
+            val progressColor = Color(0xFFB0AEC6)
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(6.dp)
+                    .size(22.dp)
+                    .drawBehind {
+                        val stroke = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
+                        val diameter = size.minDimension - stroke.width
+                        val topLeft = Offset(stroke.width / 2f, stroke.width / 2f)
+                        drawArc(
+                            color = trackColor,
+                            startAngle = -90f,
+                            sweepAngle = 360f,
+                            useCenter = false,
+                            topLeft = topLeft,
+                            size = Size(diameter, diameter),
+                            style = stroke,
+                        )
+                        drawArc(
+                            color = progressColor,
+                            startAngle = -90f,
+                            sweepAngle = playedPercentage * 360f,
+                            useCenter = false,
+                            topLeft = topLeft,
+                            size = Size(diameter, diameter),
+                            style = stroke,
+                        )
+                    }
+                    .background(Color(0x99000000), CircleShape),
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class, ExperimentalSharedTransitionApi::class)
+@Composable
 fun MediaPosterCard(
     media: MediaItem,
     modifier: Modifier = Modifier,
@@ -74,6 +154,7 @@ fun MediaPosterCard(
     titleBelow: Boolean = false,
     topRightLabel: String? = null,
     onClick: (() -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
 ) {
     val shape = RoundedCornerShape(if (compact) 14.dp else 16.dp)
     val posterShape = RoundedCornerShape(if (compact) 11.dp else 13.dp)
@@ -84,13 +165,14 @@ fun MediaPosterCard(
     if (isLibraryStyle && titleBelow) {
         Column(
             modifier = modifier.then(
-                if (onClick != null) {
+                if (onClick != null || onLongClick != null) {
                     Modifier
-                        .pressScale(interactionSource)
-                        .clickable(
+                        .hapticPressScale(interactionSource)
+                        .combinedClickable(
                             interactionSource = interactionSource,
                             indication = null,
-                            onClick = onClick,
+                            onClick = onClick ?: {},
+                            onLongClick = onLongClick,
                         )
                 } else {
                     Modifier
@@ -127,10 +209,20 @@ fun MediaPosterCard(
                         .clip(posterShape)
                         .background(SoftUiSurfacePressed),
                 ) {
+                    val sharedScope = LocalSharedTransitionScope.current
+                    val animScope = LocalAnimatedVisibilityScope.current
+                    val imageModifier = if (sharedScope != null && animScope != null) {
+                        with(sharedScope) {
+                            Modifier.fillMaxSize().sharedElement(
+                                rememberSharedContentState(key = "poster-${media.id}"),
+                                animatedVisibilityScope = animScope,
+                            )
+                        }
+                    } else Modifier.fillMaxSize()
                     PixelCatAsyncImage(
                         model = media.primaryImageUrl,
                         contentDescription = media.title,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = imageModifier,
                         contentScale = ContentScale.Crop,
                     )
                 }
@@ -143,6 +235,12 @@ fun MediaPosterCard(
                             .padding(10.dp)
                     )
                 }
+
+                MediaWatchedOverlay(
+                    played = media.played,
+                    playedPercentage = media.playedPercentage,
+                    modifier = Modifier.fillMaxSize(),
+                )
             }
 
             Column(
@@ -175,6 +273,7 @@ fun MediaPosterCard(
         modifier = modifier,
         shape = shape,
         onClick = onClick,
+        onLongClick = onLongClick,
         contentPadding = PaddingValues(0.dp),
     ) {
         if (isLibraryStyle) {
@@ -204,10 +303,20 @@ fun MediaPosterCard(
                         .clip(posterShape)
                         .background(SoftUiSurfacePressed),
                 ) {
+                    val sharedScope2 = LocalSharedTransitionScope.current
+                    val animScope2 = LocalAnimatedVisibilityScope.current
+                    val imageModifier2 = if (sharedScope2 != null && animScope2 != null) {
+                        with(sharedScope2) {
+                            Modifier.fillMaxSize().sharedElement(
+                                rememberSharedContentState(key = "poster-${media.id}"),
+                                animatedVisibilityScope = animScope2,
+                            )
+                        }
+                    } else Modifier.fillMaxSize()
                     PixelCatAsyncImage(
                         model = media.primaryImageUrl,
                         contentDescription = media.title,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = imageModifier2,
                         contentScale = ContentScale.Crop,
                     )
                 }
@@ -238,6 +347,12 @@ fun MediaPosterCard(
                             .padding(10.dp)
                     )
                 }
+
+                MediaWatchedOverlay(
+                    played = media.played,
+                    playedPercentage = media.playedPercentage,
+                    modifier = Modifier.fillMaxSize(),
+                )
             }
         } else {
             Column(
@@ -256,10 +371,20 @@ fun MediaPosterCard(
                             .clip(posterShape)
                             .background(SoftUiSurfacePressed),
                     ) {
+                        val sharedScope3 = LocalSharedTransitionScope.current
+                        val animScope3 = LocalAnimatedVisibilityScope.current
+                        val imageModifier3 = if (sharedScope3 != null && animScope3 != null) {
+                            with(sharedScope3) {
+                                Modifier.fillMaxSize().sharedElement(
+                                    rememberSharedContentState(key = "poster-${media.id}"),
+                                    animatedVisibilityScope = animScope3,
+                                )
+                            }
+                        } else Modifier.fillMaxSize()
                         PixelCatAsyncImage(
                             model = media.primaryImageUrl,
                             contentDescription = media.title,
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = imageModifier3,
                             contentScale = ContentScale.Crop,
                         )
                     }
@@ -288,6 +413,12 @@ fun MediaPosterCard(
                             modifier = Modifier.size(16.dp),
                         )
                     }
+
+                    MediaWatchedOverlay(
+                        played = media.played,
+                        playedPercentage = media.playedPercentage,
+                        modifier = Modifier.align(Alignment.BottomEnd),
+                    )
                 }
 
                 Column(

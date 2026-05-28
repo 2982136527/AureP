@@ -3,6 +3,38 @@ package com.qiuhu.embyflow.model
 import androidx.compose.ui.graphics.Color
 import java.util.Locale
 
+data class ChapterInfo(
+    val name: String,
+    val startPositionMs: Long,
+)
+
+data class TrickplayInfo(
+    val width: Int,
+    val height: Int,
+    val tileWidth: Int,
+    val tileHeight: Int,
+    val thumbnailCount: Int,
+    val interval: Long,
+    val baseUrl: String = "",
+    val itemId: String = "",
+) {
+    val columns: Int get() = if (tileWidth > 0) width / tileWidth else 1
+    val rows: Int get() = if (tileHeight > 0) height / tileHeight else 1
+    val thumbnailsPerTile: Int get() = columns * rows
+
+    fun tileUrl(index: Int): String {
+        val tileIndex = if (thumbnailsPerTile > 0) index / thumbnailsPerTile else 0
+        return "$baseUrl/Videos/$itemId/Trickplay/$width/$tileIndex.jpg"
+    }
+
+    fun thumbnailOffset(index: Int): Pair<Int, Int> {
+        val localIndex = if (thumbnailsPerTile > 0) index % thumbnailsPerTile else 0
+        val col = localIndex % columns
+        val row = localIndex / columns
+        return (col * tileWidth) to (row * tileHeight)
+    }
+}
+
 data class MediaItem(
     val id: String,
     val title: String,
@@ -33,6 +65,10 @@ data class MediaItem(
     val unplayedItemCount: Int? = null,
     val isFolder: Boolean = false,
     val resumePositionMs: Long = 0L,
+    val played: Boolean = false,
+    val playedPercentage: Float = 0f,
+    val chapters: List<ChapterInfo> = emptyList(),
+    val trickplay: Map<Int, TrickplayInfo> = emptyMap(),
 )
 
 data class MediaPerson(
@@ -64,6 +100,7 @@ data class EmbyHomePayload(
     val highlightItems: List<MediaItem>,
     val latestItems: List<MediaItem>,
     val resumeItems: List<MediaItem>,
+    val nextUpItems: List<MediaItem> = emptyList(),
     val libraries: List<MediaItem>,
     val selectedLibraryId: String?,
     val libraryItems: List<MediaItem>,
@@ -295,6 +332,7 @@ object SampleCatalog {
         highlightItems = trendingItems,
         latestItems = trendingItems,
         resumeItems = continueWatchingItems,
+        nextUpItems = emptyList(),
         libraries = libraryItems.map {
             it.copy(
                 isFolder = true,

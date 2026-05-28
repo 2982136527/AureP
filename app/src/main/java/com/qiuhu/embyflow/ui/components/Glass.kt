@@ -3,8 +3,8 @@ package com.qiuhu.embyflow.ui.components
 import android.graphics.RenderEffect
 import android.graphics.RuntimeShader
 import android.os.Build
+import kotlin.math.cos
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -91,7 +91,7 @@ fun GlassBackdrop(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 18000, easing = LinearEasing),
+            animation = tween(durationMillis = 18000, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse,
         ),
         label = "glass-backdrop-drift",
@@ -162,7 +162,7 @@ fun GlassPanel(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 7600, easing = LinearEasing),
+            animation = tween(durationMillis = 7600, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse,
         ),
         label = "glass-sweep",
@@ -171,7 +171,7 @@ fun GlassPanel(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 11800, easing = LinearEasing),
+            animation = tween(durationMillis = 11800, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse,
         ),
         label = "glass-drift",
@@ -189,8 +189,8 @@ fun GlassPanel(
         initialValue = 0f,
         targetValue = 12f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 8200, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
+            animation = tween(durationMillis = 8200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
         ),
         label = "glass-shader-time",
     )
